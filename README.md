@@ -16,6 +16,7 @@ Charging real car at 6A - current setpoint can be changed in real time and vehic
 <img src="https://github.com/user-attachments/assets/6664beeb-25bf-4822-97a6-7bf8c94cb628" alt="Alt Text" style="width:30%; height:auto;">
 
 PCB Designed by me - produced by JLCPCB
+
 <img src="https://github.com/user-attachments/assets/edd2551b-6f4c-4058-9826-bdea2e6f5002" alt="Alt Text" style="width:40%; height:auto;">
 <img src="https://github.com/user-attachments/assets/63f8fcb8-f410-4154-9450-279c3e58c243" alt="Alt Text" style="width:40%; height:auto;">
 <img src="https://github.com/user-attachments/assets/bf221ddc-6771-4154-95e3-2095ccb661a0" alt="Alt Text" style="width:40%; height:auto;">
