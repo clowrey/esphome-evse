@@ -1,5 +1,6 @@
-#packages and general YAML format inspired by https://github.com/agillis/esphome-configs
+
 #EVSE code and hardware inspired by https://github.com/dzurikmiroslav/esp32-evse
+#packages and general YAML format inspired by https://github.com/agillis/esphome-configs
 
 substitutions:
   name: "car-charger"
