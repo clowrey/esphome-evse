@@ -14,6 +14,11 @@ The source was modular with multiple external "packages" YAML used - but I have 
 
 [Post in the ESPHome Discord "Show Off" Channel](https://discord.com/channels/429907082951524364/1308643575449518160) 
 
+
+[Inspired by this great ESP32 (not ESPHome) project!](https://github.com/dzurikmiroslav/esp32-evse) 
+
+[Miroslav Dzúrik explains the CP protocol and hardware to generate it in depth on his Wiki here.](https://github.com/dzurikmiroslav/esp32-evse/wiki/CP-calibration)
+
 This example image of the GUI(during dev) is without hardware besides the LCD - hence the numbers dont all make sense:
 
 <img src="https://github.com/user-attachments/assets/d5dc5018-489b-47c6-98ba-9c22a993e556" alt="Alt Text" style="width:50%; height:auto;">
