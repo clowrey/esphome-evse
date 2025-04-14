@@ -1,0 +1,692 @@
+#packages and general YAML format inspired by https://github.com/agillis/esphome-configs
+#EVSE code and hardware inspired by https://github.com/dzurikmiroslav/esp32-evse
+
+substitutions:
+  name: "car-charger"
+  friendly_name: "Car Charger"
+  device_description: "EVSE based on Guition ESP32-S3-jc3248w535 320px X 480px Dev Board"
+  icon_font: roboto18
+  text_font: roboto18
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  min_version: 2024.11.0
+  platformio_options:
+    board_build.flash_mode: dio
+  on_boot:
+    priority: 800
+    then:
+      - output.set_level:
+          id: cp_pwm_pin
+          level: 100% # output 12V DC when no EV connected
+      - sensor.template.publish:
+          id: cp_pwm_template
+          state: 1 # output 12V DC when no EV connected
+      - number.set:
+          id: cp_state_machine
+          value: '0' # = State A = Not connected
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      COMPILER_OPTIMIZATION_SIZE: y
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
+      CONFIG_SPIRAM_RODATA: y
+
+preferences:
+  flash_write_interval: 1min      
+
+external_components:
+  - source: github://pr#8553 #necessary for LCD touchscreen until this fix is merged etc
+    components: [axs15231]
+    refresh: 1h
+
+psram:
+  mode: octal
+  speed: 80MHz #cant go faster than 80 will revert to 40
+
+# Enable logging
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s #disable automatic reboot if no wifi - Defaults to 15min - Does not apply when in access point mode.
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s #disable automatic when no HA connection - Defaults to 15 min
+
+web_server:
+  port: 80
+  version: 3  
+
+time:
+  - platform: homeassistant
+    id: system_time
+    on_time_sync:
+      - if: # Update the last restart time
+          condition:
+            lambda: 'return id(device_last_restart).state == "";'
+          then:
+            - text_sensor.template.publish:
+                id: device_last_restart
+                state: !lambda 'return id(system_time).now().strftime("%a %d %b %Y - %I:%M:%S %p");'
+
+text_sensor:
+  - platform: template
+    name: 'Last Restart'
+    id: device_last_restart
+    icon: mdi:clock
+    entity_category: diagnostic
+
+interval:
+  - interval: 100ms
+    then:
+      lambda: !lambda |-
+        int index = id(cp_state_machine).state;
+        switch (index)
+        {
+          case 0:
+            id(relay).turn_off();       //turn off relay when idle
+            id(cp_pwm_template).publish_state(1); // output 12V DC when no EV connected
+            break;
+          case 1:
+            id(relay).turn_on(); //turn on relay for charging
+            id(cp_pwm_template).publish_state(id(current_setpoint).state / 60); // output current setpoint pwm
+            break;
+          case 2:
+            id(relay).turn_on(); //turn on relay for charging
+            id(cp_pwm_template).publish_state(id(current_setpoint).state / 60); // output current setpoint pwm
+            break;
+        }
+
+number:
+  - platform: template
+    unit_of_measurement: A
+    device_class: current
+    name: Current Setpoint
+    id: current_setpoint
+    min_value: 6 #minimum allowed by the standard is 5A - initial testing showed 5A = 0A on Nissan Leaf - maybe needs better calibration
+    max_value: 48 #set your max current here
+    step: 1
+    restore_value: true
+    optimistic: True
+    mode: BOX #display a box vs slider in the HA dashboard
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: current_setpoint_label
+            text:
+              format: "%.0f Amps"
+              args: [ x ]
+
+  - platform: template
+    id: cp_state_machine
+    name: CP State Machine
+    restore_value: False
+    initial_value: 0
+    min_value: 0
+    max_value: 4
+    step: 1
+    optimistic: True
+    entity_category: "diagnostic"
+
+sensor:
+  - platform: adc
+    pin: 7
+    id: current_sensor_pin
+    accuracy_decimals: 5
+    attenuation: AUTO #0db
+    #name: Current Sensor ADC
+    entity_category: "diagnostic"
+
+  - platform: ct_clamp
+    sensor: current_sensor_pin
+    name: "Current"
+    id: current
+    accuracy_decimals: 2
+    sample_duration: 500ms
+    update_interval: 2000ms
+    filters: 
+      - calibrate_polynomial:
+          degree: 2
+          datapoints:
+          - 0.0160 -> 0.0
+          - 0.13 -> 6.2
+          - 0.22 -> 10
+          - 0.51 -> 23
+          - 0.6 -> 29.1
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: current_label
+            text:
+              format: "%.2f A"
+              args: [ x ]
+
+  - platform: template
+    name: Current Raw
+    internal: True 
+    accuracy_decimals: 5
+    entity_category: "diagnostic"
+    lambda: |-
+        return id(current).raw_state;
+    update_interval: 1s
+
+  - platform: adc
+    pin: 6
+    id: voltage_sensor_pin
+    accuracy_decimals: 5
+    attenuation: auto #0db
+    #name: Voltage Sensor ADC
+    entity_category: "diagnostic"
+
+  - platform: ct_clamp #current sensor component can be used to measure voltage
+    sensor: voltage_sensor_pin
+    name: "Voltage"
+    unit_of_measurement: V
+    device_class: voltage
+    id: voltage
+    sample_duration: 500ms
+    update_interval: 2000ms
+    accuracy_decimals: 1
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 1
+          window_size: 30
+      - calibrate_polynomial:
+          degree: 2
+          datapoints:
+          - 0.0035 -> 0.0
+          - 0.246 -> 118.5
+          - 0.49437 -> 239.1
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: voltage_label
+            text:
+              format: "%.0f V"
+              args: [ x ]
+
+  - platform: template
+    name: Voltage Raw
+    internal: True
+    accuracy_decimals: 5
+    entity_category: "diagnostic"
+    lambda: |-
+        return id(voltage).raw_state;
+    update_interval: 1s
+
+  - platform: template
+    name: Power
+    id: power
+    accuracy_decimals: 2
+    device_class: power
+    unit_of_measurement: kW
+    lambda: |-
+        return id(voltage).state * id(current).state;
+    update_interval: 1s
+    filters: 
+      - multiply: 0.001 # scale to kW
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: power_label
+            text:
+              format: "%.2f kW"
+              args: [ x ]
+
+
+  - platform: total_daily_energy
+    name: "Daily Energy"
+    power_id: power
+    accuracy_decimals: 2
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: daily_energy_label
+            text:
+              format: "%.2f kWh"
+              args: [ x ]
+
+  - platform: ntc
+    sensor: ntc_resistance_sensor
+    calibration:
+      b_constant: 4460
+      reference_temperature: 25°C
+      reference_resistance: 10kOhm
+    name: Temperature PCB
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: temperature_label
+            text:
+              format: "%.1f °C"
+              args: [ x ]
+
+  - platform: resistance
+    id: ntc_resistance_sensor
+    sensor: ntc_sensor_pin
+    configuration: DOWNSTREAM
+    resistor: 5.6kOhm
+    #name: NTC Resistance #for debugging only
+    entity_category: "diagnostic"
+
+  - platform: adc
+    id: ntc_sensor_pin
+    pin: 5
+    #name: NTC ADC Pin #for debugging only
+    accuracy_decimals: 5
+    attenuation: auto #didnt seem to change anything
+    entity_category: "diagnostic"
+    
+  - platform: template
+    #name: CP Output PWM Duty Cycle #for debugging only
+    accuracy_decimals: 5
+    id: cp_pwm_template
+    entity_category: "diagnostic"
+    on_value:
+      then:
+        - output.set_level:
+            id: cp_pwm_pin
+            level: !lambda 'return x;' 
+  
+  - platform: adc
+    pin: 9
+    id: cp_sensor_pin
+    #name: CP ADC Pin #for debugging only
+    accuracy_decimals: 5
+    attenuation: 12db #fixed attentuation - not sure if necessary
+    update_interval: 1ms
+    entity_category: "diagnostic"
+    internal: True
+    filters:
+      - calibrate_polynomial: # convert raw values into actual voltage on the CP line - only for the high pwm cycle - any negative voltage below 0 will equal 0
+          degree: 2
+          datapoints:
+          - 0 -> 0
+          - 1.85 -> 5.66
+          - 2.2 -> 9
+          - 2.57 -> 12.56
+    on_value:
+      then:
+        lambda: !lambda |-
+          if (x > 3)
+          {
+            id(cp_sensor_high_average_v).publish_state(x);
+          }
+
+  - platform: template
+    name: CP High State Average Voltage
+    internal: True
+    accuracy_decimals: 5
+    id: cp_sensor_high_average_v
+    entity_category: "diagnostic"
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 5
+          window_size: 5
+          send_first_at: 5
+    on_value:
+      then:
+        lambda: !lambda |-
+          if (x > 10.5)
+          {
+            id(cp_state_machine).publish_state(0); // = State A = Not connected = turn off relay = set PWM to DC 12V (happens in interval)
+          }else if (x > 7)
+          {
+            id(cp_state_machine).publish_state(1); // = State B = EV connected, ready to charge = turn on relay in this state = set PWM to the Ampacity value
+          }else if (x > 4.5)
+          {
+            id(cp_state_machine).publish_state(2); // = State C = EV Charging = leave relay on
+          }else if (x > 2)
+          {
+            id(cp_state_machine).publish_state(3); // = State D = EV charging, ventilation required
+          }
+
+output:
+  - platform: ledc # Duty cycle = amps / 0.6
+    pin: 15
+    id: cp_pwm_pin
+  - platform: ledc 
+    pin: GPIO1
+    id: backlight
+    frequency: 1000Hz
+
+switch:
+  - platform: gpio
+    pin: 14
+    id: relay
+    entity_category: "diagnostic"
+    #name: AC Relay
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto24
+    size: 24
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto18
+    size: 18
+    bpp: 8
+    
+light:
+  - platform: monochromatic
+    output: backlight
+    name: Display Backlight
+    id: display_backlight
+    restore_mode: ALWAYS_ON
+
+#-------------------------------------------
+# Touchscreen
+#-------------------------------------------
+
+i2c:
+  sda: 4
+  scl: 8
+  id: touchscreen_bus
+
+touchscreen:
+  - platform: axs15231
+    id: my_touchscreen
+    display: my_display
+    i2c_id: touchscreen_bus
+    calibration:
+      x_min: 0
+      x_max: 480
+      y_min: 0
+      y_max: 320
+    transform:
+      swap_xy: true
+      mirror_x: true
+      mirror_y: false
+    on_touch:
+      - lambda: |-
+          ESP_LOGI("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
+            touch.x,
+            touch.y,
+            touch.x_raw,
+            touch.y_raw
+          );
+
+#-------------------------------------------
+# Display axs15231 QSPI
+#-------------------------------------------
+
+spi:
+  id: display_qspi
+  type: quad
+  clk_pin: 47
+  data_pins: [21, 48, 40, 39]
+  
+display:
+  - platform: qspi_dbi
+    model: JC4832W535
+    data_rate: 40MHz
+    id: my_display
+    spi_id: display_qspi
+    dimensions:
+      height: 480
+      width: 320
+    cs_pin:
+      number: 45
+      ignore_strapping_warning: true
+    # The display can be rotated 180 or mirrored using mirror_x and mirror_y, but swap_xy does not work.
+    # Software rotation using rotation: 90 works (also for 270) but requires full screen redraws so is slow. The display itself is quite fast so it’s still usable though.
+    # 90 & 270 need swap_xy to be true in the touchscreen section
+    rotation: 270 # 90 for landscape, 0 for portrait
+    #draw_from_origin: true
+    #update_interval: never
+    auto_clear_enabled: false
+    #show_test_card: true # must enable update_interval, auto_clear_enable
+
+# Main LVGL section
+lvgl:
+  displays:
+    - my_display
+  touchscreens:
+    - my_touchscreen
+  page_wrap: true
+  theme:
+    obj:
+      border_width: 0
+      pad_all: 0
+      bg_color: 0
+      text_color: white
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    label:
+      border_width: 0
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    image:
+      border_width: 0
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    button:
+      text_font: $text_font
+      scroll_on_focus: true
+      radius: 15px
+      shadow_width: 0 # This is required even though the default is supposed to be 0
+      checked:
+        bg_color: green
+        text_color: white
+
+# Main Page
+  pages:
+    - id: main_page
+      #layout:
+      #  type: flex
+      #  flex_flow: ROW_WRAP
+      height: 320
+      width: 480
+      text_font: $text_font
+      scrollable: false
+      text_color: white
+      bg_color: 0
+      bg_opa: COVER
+      radius: 0
+      pad_all: 5
+      widgets: # Include all the buttons
+        - obj:
+            align: LEFT_MID
+            width: 80
+            height: 320
+            pad_all: 5
+            layout:
+              pad_column: 0
+              type: GRID
+              grid_rows: [FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40)]
+              grid_columns: [FR(80)]
+            widgets:
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 0
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  id: btn_auto
+                  widgets:
+                    - label:
+                        align: center
+                        text: "Auto"
+                        text_color: white
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 1
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "6A"
+                        text_color: white
+                  on_short_click:
+                    - number.set:
+                        id: current_setpoint
+                        value: 6
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 2
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "15A"
+                        text_color: white
+                  on_short_click:
+                    - number.set:
+                        id: current_setpoint
+                        value: 15
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 3
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "20A"
+                        text_color: white
+                  on_short_click:
+                    - number.set:
+                        id: current_setpoint
+                        value: 20
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 4
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "25A"
+                        text_color: white
+                  on_short_click:
+                    - number.set:
+                        id: current_setpoint
+                        value: 25
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 5
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "30A"
+                        text_color: white
+                  on_short_click:
+                    - number.set:
+                        id: current_setpoint
+                        value: 30
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 6
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "40A"
+                        text_color: white
+                  on_short_click:
+                    - number.set:
+                        id: current_setpoint
+                        value: 40
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 7
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "48A"
+                        text_color: white
+                  on_short_click:
+                    - number.set:
+                        id: current_setpoint
+                        value: 48
+        - obj:
+            align: RIGHT_MID
+            width: 240
+            height: 320
+            pad_all: 5
+            layout:
+              pad_column: 0
+              type: GRID
+              grid_rows: [FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40)]
+              grid_columns: [FR(40), FR(20)]
+            widgets:
+              - label:
+                  text: "Current Setpoint: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 0
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 0
+                  id: current_setpoint_label
+              - label:
+                  text: "Power: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 1
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 1
+                  id: power_label
+              - label:
+                  text: "Daily Energy: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 2
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 2
+                  id: daily_energy_label
+              - label:
+                  text: "Voltage: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 3
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 3
+                  id: voltage_label
+              - label:
+                  text: "Current: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 4
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 4
+                  id: current_label
+              - label:
+                  text: "Temperature PCB: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 5
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 5
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  text: "--.- °C"
+                  id: temperature_label
