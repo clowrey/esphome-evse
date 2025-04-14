@@ -12,6 +12,8 @@ This could be run without any LCD HMI but I always wanted to have local user con
 
 The source was modular with multiple external "packages" YAML used - but I have condensed it all into one file for this initial release just so its easier to follow.. I may go back to modular format but maybe not. 
 
+[Post in the ESPHome Discord "Show Off" Channel](https://discord.com/channels/429907082951524364/1308643575449518160) 
+
 This example image of the GUI(during dev) is without hardware besides the LCD - hence the numbers dont all make sense:
 
 <img src="https://github.com/user-attachments/assets/d5dc5018-489b-47c6-98ba-9c22a993e556" alt="Alt Text" style="width:50%; height:auto;">
