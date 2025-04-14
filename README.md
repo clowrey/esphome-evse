@@ -1,7 +1,12 @@
 # esphome-evse
 EVSE running entirely on ESP32 MCU ESPHome YAML
 
-BETA YAML firmware - there WILL still be bugs I am sure.. But base functionality is there! No RCD code yet. No safety checks. Use at your own risk!
+BETA YAML firmware - there WILL still be bugs I am sure.. But base functionality is there! 
+- No RCD code yet. 
+- No safety checks.
+- Auto button doesn't do anything yet - but controlling the current setpoint programmatically from Home Assistant is the main reason I went to all this trouble.. 
+- Use at your own risk!
+
 
 This could be run without any LCD HMI but I always wanted to have local user control possible and its easier to remove functionality vs add it later so there you go.. 
 
