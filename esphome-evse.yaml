@@ -1,10 +1,9 @@
-
 #EVSE code and hardware inspired by https://github.com/dzurikmiroslav/esp32-evse
 #packages and general YAML format inspired by https://github.com/agillis/esphome-configs
 
 substitutions:
-  name: "car-charger"
-  friendly_name: "Car Charger"
+  name: "car-charger-2"
+  friendly_name: "Car Charger 2"
   device_description: "EVSE based on Guition ESP32-S3-jc3248w535 320px X 480px Dev Board"
   icon_font: roboto18
   text_font: roboto18
@@ -91,10 +90,19 @@ time:
 
 text_sensor:
   - platform: template
-    name: 'Last Restart'
+    name: Last Restart
     id: device_last_restart
     icon: mdi:clock
     entity_category: diagnostic
+  
+  - platform: template
+    name: CP State
+    id: text_cp_state
+    on_value: 
+      then:
+        - lvgl.label.update:
+            id: label_cp_state
+            text: !lambda 'return x;'
 
 interval:
   - interval: 100ms
@@ -106,6 +114,7 @@ interval:
           case 0:
             id(relay).turn_off();       //turn off relay when idle
             id(cp_pwm_template).publish_state(1); // output 12V DC when no EV connected
+            id(text_cp_state).publish_state("Idle");
             break;
           case 1:
             id(relay).turn_on(); //turn on relay for charging
@@ -134,12 +143,13 @@ number:
         - lvgl.label.update:
             id: current_setpoint_label
             text:
-              format: "%.0f Amps"
+              format: "%.0f A"
               args: [ x ]
 
   - platform: template
     id: cp_state_machine
     name: CP State Machine
+    internal: true
     restore_value: False
     initial_value: 0
     min_value: 0
@@ -147,6 +157,25 @@ number:
     step: 1
     optimistic: True
     entity_category: "diagnostic"
+    on_value:
+      lambda: !lambda |-
+        int index = x;
+        switch (index)
+        {
+          case 0:
+            id(text_cp_state).publish_state("Idle");
+            break;
+          case 1:
+            id(text_cp_state).publish_state("EV Connected");
+            break;
+          case 2:
+            id(text_cp_state).publish_state("EV Charging");
+            break;
+          case 3:
+            id(text_cp_state).publish_state("EV Vent");
+            break;
+        }
+
 
 sensor:
   - platform: adc
@@ -180,6 +209,7 @@ sensor:
             text:
               format: "%.2f A"
               args: [ x ]
+  
 
   - platform: template
     name: Current Raw
@@ -276,7 +306,7 @@ sensor:
     on_value:
       then:
         - lvgl.label.update:
-            id: temperature_label
+            id: temperature_pcb_label
             text:
               format: "%.1f °C"
               args: [ x ]
@@ -361,6 +391,17 @@ sensor:
             id(cp_state_machine).publish_state(3); // = State D = EV charging, ventilation required
           }
 
+  - platform: internal_temperature
+    name: "Temperature ESP32"
+    id: temp_esp32
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: temperature_esp32_label
+            text:
+              format: "%.1f °C"
+              args: [ x ]
+
 output:
   - platform: ledc # Duty cycle = amps / 0.6
     pin: 15
@@ -376,6 +417,27 @@ switch:
     id: relay
     entity_category: "diagnostic"
     #name: AC Relay
+  - platform: lvgl
+    widget: btn_auto
+    name: Auto Mode
+    id: auto_mode
+    on_turn_on:
+      - lvgl.label.update:
+          id: label_auto
+          text: "Mode: Auto"
+    on_turn_off:
+      - lvgl.label.update:
+          id: label_auto
+          text: "Mode: Manual"
+
+button:
+  - platform: template
+    name: Set 6A
+    icon: "mdi:emoticon-outline"
+    on_press:
+      - number.set:
+          id: current_setpoint
+          value: 6
 
 font:
   - file: "gfonts://Roboto"
@@ -487,7 +549,7 @@ lvgl:
     button:
       text_font: $text_font
       scroll_on_focus: true
-      radius: 15px
+      radius: 10px
       shadow_width: 0 # This is required even though the default is supposed to be 0
       checked:
         bg_color: green
@@ -511,29 +573,63 @@ lvgl:
       widgets: # Include all the buttons
         - obj:
             align: LEFT_MID
-            width: 80
+            width: 200
             height: 320
             pad_all: 5
             layout:
-              pad_column: 0
+              pad_column: 5
               type: GRID
-              grid_rows: [FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40)]
-              grid_columns: [FR(80)]
+              grid_rows: [FR(40), FR(40), FR(40), FR(40), FR(40)]
+              grid_columns: [FR(80), FR(80)]
             widgets:
               - button:
                   grid_cell_column_pos: 0
                   grid_cell_row_pos: 0
+                  grid_cell_column_span: 2
                   grid_cell_x_align: STRETCH
                   grid_cell_y_align: STRETCH
                   id: btn_auto
+                  checkable: true
+                  bg_color: grey
                   widgets:
                     - label:
+                        id: label_auto
                         align: center
-                        text: "Auto"
+                        text: "Mode: ----"
                         text_color: white
               - button:
                   grid_cell_column_pos: 0
                   grid_cell_row_pos: 1
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "Amps -"
+                        text_color: white
+                  on_short_click:
+                    - number.decrement:
+                        id: current_setpoint
+                        cycle: false
+                    - switch.turn_off: auto_mode
+              - button:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 1
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  widgets:
+                    - label:
+                        align: center
+                        text: "Amps +"
+                        text_color: white
+                  on_short_click:
+                    - number.increment:
+                        id: current_setpoint
+                        cycle: false
+                    - switch.turn_off: auto_mode
+              - button:
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 2
                   grid_cell_x_align: STRETCH
                   grid_cell_y_align: STRETCH
                   widgets:
@@ -545,20 +641,22 @@ lvgl:
                     - number.set:
                         id: current_setpoint
                         value: 6
+                    - switch.turn_off: auto_mode
               - button:
-                  grid_cell_column_pos: 0
+                  grid_cell_column_pos: 1
                   grid_cell_row_pos: 2
                   grid_cell_x_align: STRETCH
                   grid_cell_y_align: STRETCH
                   widgets:
                     - label:
                         align: center
-                        text: "15A"
+                        text: "12A"
                         text_color: white
                   on_short_click:
                     - number.set:
                         id: current_setpoint
-                        value: 15
+                        value: 12
+                    - switch.turn_off: auto_mode
               - button:
                   grid_cell_column_pos: 0
                   grid_cell_row_pos: 3
@@ -573,23 +671,10 @@ lvgl:
                     - number.set:
                         id: current_setpoint
                         value: 20
+                    - switch.turn_off: auto_mode
               - button:
-                  grid_cell_column_pos: 0
-                  grid_cell_row_pos: 4
-                  grid_cell_x_align: STRETCH
-                  grid_cell_y_align: STRETCH
-                  widgets:
-                    - label:
-                        align: center
-                        text: "25A"
-                        text_color: white
-                  on_short_click:
-                    - number.set:
-                        id: current_setpoint
-                        value: 25
-              - button:
-                  grid_cell_column_pos: 0
-                  grid_cell_row_pos: 5
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 3
                   grid_cell_x_align: STRETCH
                   grid_cell_y_align: STRETCH
                   widgets:
@@ -601,9 +686,10 @@ lvgl:
                     - number.set:
                         id: current_setpoint
                         value: 30
+                    - switch.turn_off: auto_mode
               - button:
                   grid_cell_column_pos: 0
-                  grid_cell_row_pos: 6
+                  grid_cell_row_pos: 4
                   grid_cell_x_align: STRETCH
                   grid_cell_y_align: STRETCH
                   widgets:
@@ -615,9 +701,10 @@ lvgl:
                     - number.set:
                         id: current_setpoint
                         value: 40
+                    - switch.turn_off: auto_mode
               - button:
-                  grid_cell_column_pos: 0
-                  grid_cell_row_pos: 7
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 4
                   grid_cell_x_align: STRETCH
                   grid_cell_y_align: STRETCH
                   widgets:
@@ -629,6 +716,7 @@ lvgl:
                     - number.set:
                         id: current_setpoint
                         value: 48
+                    - switch.turn_off: auto_mode
         - obj:
             align: RIGHT_MID
             width: 240
@@ -681,13 +769,29 @@ lvgl:
                   grid_cell_row_pos: 4
                   id: current_label
               - label:
-                  text: "Temperature PCB: "
+                  text: "Temp PCB: "
                   grid_cell_column_pos: 0
                   grid_cell_row_pos: 5
               - label:
                   grid_cell_column_pos: 1
                   grid_cell_row_pos: 5
-                  grid_cell_x_align: STRETCH
-                  grid_cell_y_align: STRETCH
                   text: "--.- °C"
-                  id: temperature_label
+                  id: temperature_pcb_label
+              - label:
+                  text: "Temp ESP32: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 6
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 6
+                  text: "--.- °C"
+                  id: temperature_esp32_label
+              - label:
+                  text: "CP State: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 7
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 7
+                  text: "----"
+                  id: label_cp_state
