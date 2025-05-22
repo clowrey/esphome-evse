@@ -35,3 +35,9 @@ PCB Designed by me - produced by JLCPCB
 <img src="https://github.com/user-attachments/assets/bf221ddc-6771-4154-95e3-2095ccb661a0" alt="Alt Text" style="width:40%; height:auto;">
 <img src="https://github.com/user-attachments/assets/48726e65-868e-46b8-bb4f-d90d5c7a817b" alt="Alt Text" style="width:40%; height:auto;">
 <img src="https://github.com/user-attachments/assets/52ee4612-118a-437d-b911-eaf96cbfea1c" alt="Alt Text" style="width:40%; height:auto;">
+
+
+
+<img src="https://github.com/user-attachments/assets/aeedd815-5398-4cb1-81bf-dedf85389a31" alt="Alt Text" style="width:40%; height:auto;">
+<img src="https://github.com/user-attachments/assets/885721e3-cc22-4db5-8445-3736fb2d41a7" alt="Alt Text" style="width:40%; height:auto;">
+<img src="https://github.com/user-attachments/assets/9bf606d9-bdd5-4a05-84b6-b90d1b3f0aeb" alt="Alt Text" style="width:40%; height:auto;">
