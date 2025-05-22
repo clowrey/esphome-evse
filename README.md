@@ -19,11 +19,9 @@ The source was modular with multiple external "packages" YAML used - but I have 
 
 [Miroslav Dzúrik explains the CP protocol and hardware to generate it in depth on his Wiki here.](https://github.com/dzurikmiroslav/esp32-evse/wiki/CP-calibration)
 
-This example image of the GUI(during dev) is without hardware besides the LCD - hence the numbers dont all make sense:
+<img src="https://github.com/user-attachments/assets/9bf606d9-bdd5-4a05-84b6-b90d1b3f0aeb" alt="Alt Text" style="width:40%; height:auto;">
 
-<img src="https://github.com/user-attachments/assets/d5dc5018-489b-47c6-98ba-9c22a993e556" alt="Alt Text" style="width:50%; height:auto;">
-
-Charging real car at 6A - current setpoint can be changed in real time and vehicle will adjust its draw.
+Charging real car at 40A - current setpoint can be changed in real time and vehicle will adjust its draw.
 
 <img src="https://github.com/user-attachments/assets/bde0680d-757e-4c0f-a392-faaf9ced7648" alt="Alt Text" style="width:30%; height:auto;">
 <img src="https://github.com/user-attachments/assets/6664beeb-25bf-4822-97a6-7bf8c94cb628" alt="Alt Text" style="width:30%; height:auto;">
@@ -40,4 +38,4 @@ PCB Designed by me - produced by JLCPCB
 
 <img src="https://github.com/user-attachments/assets/aeedd815-5398-4cb1-81bf-dedf85389a31" alt="Alt Text" style="width:40%; height:auto;">
 <img src="https://github.com/user-attachments/assets/885721e3-cc22-4db5-8445-3736fb2d41a7" alt="Alt Text" style="width:40%; height:auto;">
-<img src="https://github.com/user-attachments/assets/9bf606d9-bdd5-4a05-84b6-b90d1b3f0aeb" alt="Alt Text" style="width:40%; height:auto;">
+
