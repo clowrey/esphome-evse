@@ -2,8 +2,8 @@
 #packages and general YAML format inspired by https://github.com/agillis/esphome-configs
 
 substitutions:
-  name: "car-charger-2"
-  friendly_name: "Car Charger 2"
+  name: "car-charger-0"
+  friendly_name: "Car Charger 0"
   device_description: "EVSE based on Guition ESP32-S3-jc3248w535 320px X 480px Dev Board"
   icon_font: roboto18
   text_font: roboto18
@@ -48,6 +48,9 @@ external_components:
   - source: github://pr#8553 #necessary for LCD touchscreen until this fix is merged etc
     components: [axs15231]
     refresh: 1h
+  - source: "github://clowrey/esphome-gppid/"
+    components: [pid]
+    refresh: 0s
 
 psram:
   mode: octal
@@ -105,28 +108,89 @@ text_sensor:
             text: !lambda 'return x;'
 
 interval:
-  - interval: 100ms
+  - interval: 500ms #limit update rate 
     then:
       lambda: !lambda |-
-        int index = id(cp_state_machine).state;
-        switch (index)
-        {
-          case 0:
+          if (id(debug_error).state) {
             id(relay).turn_off();       //turn off relay when idle
-            id(cp_pwm_template).publish_state(1); // output 12V DC when no EV connected
-            id(text_cp_state).publish_state("Idle");
-            break;
-          case 1:
-            id(relay).turn_on(); //turn on relay for charging
-            id(cp_pwm_template).publish_state(id(current_setpoint).state / 60); // output current setpoint pwm
-            break;
-          case 2:
-            id(relay).turn_on(); //turn on relay for charging
-            id(cp_pwm_template).publish_state(id(current_setpoint).state / 60); // output current setpoint pwm
-            break;
-        }
+            id(cp_pwm_template).publish_state(0); // output 0V
+            id(text_cp_state).publish_state("Error");
+          } else {
+
+          
+           // if (id(auto_mode).state) { // determine auto mode setpoint
+
+
+            int index = id(cp_state_machine).state;
+            switch (index)
+            {
+              case 0:
+                id(relay).turn_off();       //turn off relay when idle
+                id(cp_pwm_template).publish_state(1); // output 12V DC when no EV connected
+                id(text_cp_state).publish_state("Idle");
+                break;
+              case 1:
+                if (id(enable).state) {
+                  id(cp_pwm_template).publish_state(id(current_setpoint).state / 60); // output current setpoint pwm
+                  id(relay).turn_off();
+                } else {
+                  id(relay).turn_off();
+                  id(cp_pwm_template).publish_state(1); // output 12V DC when no EV connected
+                }
+                break;
+              case 2:
+                if (id(enable).state) {
+                  id(cp_pwm_template).publish_state(id(current_setpoint).state / 60); // output current setpoint pwm
+                  id(relay).turn_on(); //turn on relay for charging
+                } else {
+                  id(relay).turn_off();       //turn off relay when disabled
+                  id(cp_pwm_template).publish_state(1); // output 12V DC when no EV connected
+                }
+                break;
+              case 4:
+                id(relay).turn_off();       //turn off relay when disabled
+                id(cp_pwm_template).publish_state(0); // output 12V DC when no EV connected
+                id(text_cp_state).publish_state("Error");
+                break;
+            }
+          }
 
 number:
+  - platform: template
+    id: v_target_num
+    name: "PID Setpoint"
+    unit_of_measurement: A
+    step: 0.1
+    min_value: 0
+    max_value: 20
+    optimistic: True
+
+  - platform: template
+    id: kp_num
+    name: "kP"
+    step: 0.001
+    min_value: 0
+    max_value: 1
+    optimistic: True
+
+  - platform: template
+    id: ki_num
+    name: "kI"
+    step: 0.001
+    min_value: 0
+    max_value: 1
+    optimistic: True
+
+  - platform: template
+    id: kd_num
+    name: "kD"
+    step: 0.001
+    min_value: 0
+    max_value: 1
+    optimistic: True
+
+
+
   - platform: template
     unit_of_measurement: A
     device_class: current
@@ -174,10 +238,19 @@ number:
           case 3:
             id(text_cp_state).publish_state("EV Vent");
             break;
+          case 4:
+            id(text_cp_state).publish_state("Error");
+            break;
         }
 
 
 sensor:
+
+  - platform: homeassistant
+    name: "HA Battery Power"
+    id: ha_battery_power
+    entity_id: sensor.bms_0_bms_packpower # this should be a sensor with positive values for charging and negative for discharging - in kW 
+
   - platform: adc
     pin: 7
     id: current_sensor_pin
@@ -328,7 +401,7 @@ sensor:
     entity_category: "diagnostic"
     
   - platform: template
-    #name: CP Output PWM Duty Cycle #for debugging only
+    name: CP Output PWM Duty Cycle #for debugging only
     accuracy_decimals: 5
     id: cp_pwm_template
     entity_category: "diagnostic"
@@ -341,12 +414,12 @@ sensor:
   - platform: adc
     pin: 9
     id: cp_sensor_pin
-    #name: CP ADC Pin #for debugging only
-    accuracy_decimals: 5
+    name: CP ADC Pin #for debugging only
+    accuracy_decimals: 5 #for display only
     attenuation: 12db #fixed attentuation - not sure if necessary
     update_interval: 1ms
     entity_category: "diagnostic"
-    internal: True
+    internal: true
     filters:
       - calibrate_polynomial: # convert raw values into actual voltage on the CP line - only for the high pwm cycle - any negative voltage below 0 will equal 0
           degree: 2
@@ -361,6 +434,10 @@ sensor:
           if (x > 3)
           {
             id(cp_sensor_high_average_v).publish_state(x);
+          }
+          else
+          {
+            id(cp_sensor_low_average_v).publish_state(x);
           }
 
   - platform: template
@@ -390,6 +467,22 @@ sensor:
           {
             id(cp_state_machine).publish_state(3); // = State D = EV charging, ventilation required
           }
+          else
+          {
+            id(cp_state_machine).publish_state(4); // = State F = Error
+          }
+
+  - platform: template
+    name: CP Low State Average Voltage
+    internal: True
+    accuracy_decimals: 5
+    id: cp_sensor_low_average_v
+    entity_category: "diagnostic"
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 5
+          window_size: 5
+          send_first_at: 5
 
   - platform: internal_temperature
     name: "Temperature ESP32"
@@ -406,17 +499,62 @@ output:
   - platform: ledc # Duty cycle = amps / 0.6
     pin: 15
     id: cp_pwm_pin
+    frequency: "1000Hz"
+
   - platform: ledc 
     pin: GPIO1
     id: backlight
-    frequency: 1000Hz
+    frequency: "1000Hz"
+
+  - platform: template
+    id: current_pid_out
+    type: float
+    write_action: {}
+
+pid:
+    - id: field_pid
+      current_value: ha_battery_power
+      target_number: v_target_num
+      #target_sensor: v_target_sensor
+      output:
+        id: current_pid_out
+        #min: 0
+        #max: 1
+      control_parameters:
+        kp: 0.5
+        ki: 0.005
+        kd: 5
+        kp_num: kp_num
+        ki_num: ki_num
+        kd_num: kd_num
+      deadband_parameters:
+        threshold_high: 0.5
+        threshold_low: -0.5
 
 switch:
+  - platform: template
+    name: "Debug Error Mode"
+    id: debug_error
+    optimistic: true
+
   - platform: gpio
     pin: 14
     id: relay
-    entity_category: "diagnostic"
-    #name: AC Relay
+    on_turn_on:
+      - lvgl.label.update:
+          id: label_relay
+          text: "On"
+      - binary_sensor.template.publish:
+          id: template_relay
+          state: ON
+    on_turn_off:
+      - lvgl.label.update:
+          id: label_relay
+          text: "Off"
+      - binary_sensor.template.publish:
+          id: template_relay
+          state: OFF
+
   - platform: lvgl
     widget: btn_auto
     name: Auto Mode
@@ -424,11 +562,31 @@ switch:
     on_turn_on:
       - lvgl.label.update:
           id: label_auto
-          text: "Mode: Auto"
+          text: "Auto"
     on_turn_off:
       - lvgl.label.update:
           id: label_auto
-          text: "Mode: Manual"
+          text: "Manual"
+
+  - platform: lvgl
+    widget: btn_enable
+    name: Enable
+    id: enable
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - lvgl.label.update:
+          id: label_enable
+          text: "Enabled"
+    on_turn_off:
+      - lvgl.label.update:
+          id: label_enable
+          text: "Disabled"
+
+
+binary_sensor:
+  - platform: template
+    name: "AC Relay"
+    id: template_relay
 
 button:
   - platform: template
@@ -585,7 +743,7 @@ lvgl:
               - button:
                   grid_cell_column_pos: 0
                   grid_cell_row_pos: 0
-                  grid_cell_column_span: 2
+                  #grid_cell_column_span: 2
                   grid_cell_x_align: STRETCH
                   grid_cell_y_align: STRETCH
                   id: btn_auto
@@ -595,7 +753,22 @@ lvgl:
                     - label:
                         id: label_auto
                         align: center
-                        text: "Mode: ----"
+                        text: "Mode"
+                        text_color: white
+              - button:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 0
+                  #grid_cell_column_span: 2
+                  grid_cell_x_align: STRETCH
+                  grid_cell_y_align: STRETCH
+                  id: btn_enable
+                  checkable: true
+                  bg_color: grey
+                  widgets:
+                    - label:
+                        id: label_enable
+                        align: center
+                        text: "en--"
                         text_color: white
               - button:
                   grid_cell_column_pos: 0
@@ -725,7 +898,7 @@ lvgl:
             layout:
               pad_column: 0
               type: GRID
-              grid_rows: [FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40)]
+              grid_rows: [FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40), FR(40)]
               grid_columns: [FR(40), FR(20)]
             widgets:
               - label:
@@ -795,3 +968,12 @@ lvgl:
                   grid_cell_row_pos: 7
                   text: "----"
                   id: label_cp_state
+              - label:
+                  text: "Relay State: "
+                  grid_cell_column_pos: 0
+                  grid_cell_row_pos: 8
+              - label:
+                  grid_cell_column_pos: 1
+                  grid_cell_row_pos: 8
+                  text: "----"
+                  id: label_relay
