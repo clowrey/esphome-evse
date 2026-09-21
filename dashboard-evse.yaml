@@ -1,0 +1,373 @@
+# Home Assistant dashboard for the default device in esphome-evse.yaml (name: evse-0).
+# Entity ids follow that name: sensor.evse_0_*, number.evse_0_*, button.evse_0_*.
+# If you change name, replace the evse_0_ prefix. Home Assistant turns the hyphen into an underscore.
+# Requires flex-horseshoe-card and Mushroom cards from HACS.
+
+views:
+  - title: EVSE
+    type: sections
+    max_columns: 3
+    sections:
+      - cards:
+          - type: heading
+            heading: EVSE
+            heading_style: subtitle
+            grid_options:
+              columns: full
+              rows: auto
+            icon: mdi:ev-station
+
+          - type: picture-elements
+            image: >-
+              data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 600 90'></svg>
+            elements:
+              - type: state-label
+                entity: sensor.evse_0_state_text_sensor_output
+                tap_action:
+                  action: more-info
+                style:
+                  top: 50%
+                  left: 50%
+                  width: 100%
+                  text-align: center
+                  font-size: clamp(0.95rem, 4vw, 1.5rem)
+                  font-weight: 700
+                  line-height: 1.15
+                  white-space: normal
+                  overflow-wrap: anywhere
+                  box-sizing: border-box
+                  padding: 0 0.75rem
+                  color: var(--primary-text-color)
+                  pointer-events: auto
+            grid_options:
+              rows: auto
+              columns: full
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                below: 0.5
+            card:
+              type: button
+              entity: button.evse_0_stop
+              name: Stop
+              icon: mdi:power
+              show_state: false
+              color_type: card
+              color: rgb(255, 82, 82)
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.evse_0_stop
+            grid_options:
+              columns: 4
+              rows: auto
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                above: 0.5
+            card:
+              type: button
+              entity: button.evse_0_stop
+              name: Stop
+              icon: mdi:power
+              show_state: false
+              color_type: card
+              color: rgb(45, 45, 45)
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.evse_0_stop
+            grid_options:
+              columns: 4
+              rows: auto
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                above: 1.5
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                below: 2.5
+            card:
+              type: button
+              entity: button.evse_0_normal
+              name: Normal
+              icon: mdi:lightning-bolt
+              show_state: false
+              color_type: card
+              color: rgb(66, 214, 106)
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.evse_0_normal
+            grid_options:
+              columns: 4
+              rows: auto
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                below: 1.5
+            card:
+              type: button
+              entity: button.evse_0_normal
+              name: Normal
+              icon: mdi:lightning-bolt
+              show_state: false
+              color_type: card
+              color: rgb(45, 45, 45)
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.evse_0_normal
+            grid_options:
+              columns: 4
+              rows: auto
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                above: 2.5
+            card:
+              type: button
+              entity: button.evse_0_normal
+              name: Normal
+              icon: mdi:lightning-bolt
+              show_state: false
+              color_type: card
+              color: rgb(45, 45, 45)
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.evse_0_normal
+            grid_options:
+              columns: 4
+              rows: auto
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                above: 2.5
+            card:
+              type: button
+              entity: button.evse_0_fast
+              name: Fast
+              icon: mdi:flash
+              show_state: false
+              color_type: card
+              color: rgb(255, 183, 77)
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.evse_0_fast
+            grid_options:
+              columns: 4
+              rows: auto
+
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: number.evse_0_charger_mode
+                below: 2.5
+            card:
+              type: button
+              entity: button.evse_0_fast
+              name: Fast
+              icon: mdi:flash
+              show_state: false
+              color_type: card
+              color: rgb(45, 45, 45)
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.evse_0_fast
+            grid_options:
+              columns: 4
+              rows: auto
+
+          - type: custom:flex-horseshoe-card
+            show:
+              horseshoe_style: colorstop
+            horseshoe_scale:
+              min: 0
+              max: 11
+            color_stops:
+              "0": "#2e7d32"
+              "3.6": "#f9a825"
+              "7.2": "#ef6c00"
+              "11": "#c62828"
+            horseshoe_state:
+              styles:
+                - stroke-linecap: butt
+            entities:
+              - entity: sensor.evse_0_power
+                decimals: 2
+                unit: ""
+                name: kW
+              - entity: sensor.evse_0_daily_energy
+                decimals: 2
+                unit: ""
+                name: kWh
+              - entity: sensor.evse_0_daily_cost
+                decimals: 2
+                unit: ""
+                name: $
+              - entity: sensor.evse_0_daily_percent
+                decimals: 1
+                unit: ""
+                name: "%"
+              - entity: sensor.evse_0_daily_percent
+                decimals: 1
+                unit: ""
+                name: Added Today
+              - entity: sensor.evse_0_ha_battery_power_filtered
+                decimals: 2
+                unit: kW
+                name: NET
+            layout:
+              horseshoes:
+                - id: 0
+                  entity_index: 5
+                  xpos: 50
+                  ypos: 50
+                  radius: 39
+                  bar_mode: bidirectional
+                  show:
+                    horseshoe: true
+                    scale_tickmarks: false
+                    horseshoe_style: colorstop
+                  horseshoe_scale:
+                    min: -10
+                    max: 10
+                    width: 8
+                    color: rgba(0, 0, 0, 0)
+                  horseshoe_state:
+                    width: 8
+                    styles:
+                      - stroke-linecap: butt
+                  color_stops:
+                    "-4": "#ff1e1e"
+                    "0": "#ff1e1e"
+                    "0.0001": "#31ff00"
+                    "4": "#31ff00"
+              states:
+                - id: 0
+                  entity_index: 0
+                  xpos: 67
+                  ypos: 46
+                  styles:
+                    - font-size: clamp(2.6rem, 10vw, 3.1rem)
+                    - font-weight: 600
+                    - text-anchor: end
+                - id: 1
+                  entity_index: 1
+                  xpos: 50
+                  ypos: 63
+                  styles:
+                    - font-size: 1.15em
+                    - opacity: 0.9
+                    - text-anchor: end
+                - id: 2
+                  entity_index: 2
+                  xpos: 50
+                  ypos: 72
+                  styles:
+                    - font-size: 1.1em
+                    - opacity: 0.85
+                    - text-anchor: end
+                - id: 3
+                  entity_index: 3
+                  xpos: 50
+                  ypos: 81
+                  styles:
+                    - font-size: 1.1em
+                    - opacity: 0.85
+                    - text-anchor: end
+                - id: 4
+                  entity_index: 5
+                  xpos: 50
+                  ypos: 27
+                  styles:
+                    - font-size: 1.1em
+                    - opacity: 0.9
+                    - text-anchor: middle
+              names:
+                - id: 0
+                  entity_index: 0
+                  xpos: 69
+                  ypos: 45
+                  styles:
+                    - font-size: 1.0em
+                    - opacity: 0.9
+                    - text-transform: none
+                    - text-anchor: start
+                - id: 1
+                  entity_index: 1
+                  xpos: 54
+                  ypos: 63
+                  styles:
+                    - font-size: 0.95em
+                    - opacity: 0.9
+                    - text-transform: none
+                    - text-anchor: start
+                - id: 2
+                  entity_index: 2
+                  xpos: 53
+                  ypos: 72
+                  styles:
+                    - font-size: 0.95em
+                    - opacity: 0.9
+                    - text-anchor: start
+                - id: 3
+                  entity_index: 3
+                  xpos: 52
+                  ypos: 81
+                  styles:
+                    - font-size: 0.95em
+                    - opacity: 0.9
+                    - text-anchor: start
+                - id: 4
+                  entity_index: 4
+                  xpos: 50
+                  ypos: 55
+                  styles:
+                    - font-size: 1.05em
+                    - opacity: 0.9
+                - id: 5
+                  entity_index: 5
+                  xpos: 50
+                  ypos: 21
+                  styles:
+                    - font-size: 0.95em
+                    - opacity: 0.9
+                    - text-anchor: middle
+
+          - type: custom:mushroom-template-card
+            secondary: |-
+              Auto current starts at 6A and ramps based on battery power.
+
+              Normal max battery discharge: 1 kW.
+              Fast target battery discharge: 3 kW.
+            multiline_secondary: true
+            icon: mdi:information-outline
+            icon_color: blue
+            tap_action:
+              action: none
+            grid_options:
+              rows: auto
+              columns: full

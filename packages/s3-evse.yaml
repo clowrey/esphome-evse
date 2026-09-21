@@ -1,0 +1,2349 @@
+# Shared ESP32-S3 EVSE firmware for the Guition ESP32-S3-jc3248w535 board.
+# A device file sets substitutions plus wifi, api, and ota.
+# Control pilot handling is the evse_cp external component; this package wires it up.
+# Hardware and CP approach inspired by https://github.com/dzurikmiroslav/esp32-evse
+
+substitutions:
+  name: "evse-0"
+  device_description: "EVSE based on Guition ESP32-S3-jc3248w535 320px X 480px Dev Board"
+  icon_font: roboto18
+  text_font: roboto18
+
+  # Signed watts: positive is charging the house battery, negative is discharging.
+  ha_battery_power_id: sensor.battery_power
+  ha_battery_voltage_id: sensor.battery_voltage
+  ha_battery_soc_id: sensor.battery_state_of_charge
+
+  # Raw CT reading -> amps. Replace these per installation.
+  current_cal_0: "0.0160 -> 0.0"
+  current_cal_1: "0.0641 -> 6.0"
+  current_cal_2: "0.1054 -> 10.0"
+  current_cal_3: "0.1721 -> 16.0"
+  current_cal_4: "0.2147 -> 20.0"
+
+  max_current_initial: "20"
+  normal_setpoint_a: "6"
+  fast_setpoint_a: "20"
+  electricity_cost_initial: "0.55"
+  car_battery_kwh_initial: "60.0"
+
+esphome:
+  name: "${name}"
+  comment: "${device_description}"
+  min_version: 2024.11.0
+  platformio_options:
+    board_build.flash_mode: dio
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          auto *cp_controller = new esphome::evse_cp::EvseCpController(100);
+          cp_controller->set_cp_pwm_output(id(cp_pwm_pin));
+          cp_controller->set_cp_pwm_sensor(id(cp_pwm_template));
+          cp_controller->set_cp_state_number(id(cp_state_machine));
+          cp_controller->set_current_setpoint_number(id(current_setpoint));
+          cp_controller->set_enable_switch(id(enable));
+          cp_controller->set_debug_error_switch(id(debug_error));
+          cp_controller->set_relay_switch(id(relay));
+          esphome::evse_cp::set_cp_controller(cp_controller);
+          cp_controller->setup();
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+      - script.execute: apply_charger_mode
+      - script.execute: apply_backlight_day_night
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      COMPILER_OPTIMIZATION_SIZE: y
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
+      CONFIG_SPIRAM_RODATA: y
+
+preferences:
+  flash_write_interval: 1min
+
+external_components:
+  - source: github://clowrey/esphome-evse
+    components: [evse_cp]
+    refresh: 0s
+
+evse_cp:
+
+# axs15231 is built into ESPHome 2026.7; the old PR overlay no longer compiles.
+
+psram:
+  mode: octal
+  speed: 80MHz #cant go faster than 80 will revert to 40
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  reboot_timeout: 0s #disable automatic reboot if no wifi - Defaults to 15min - Does not apply when in access point mode.
+
+web_server:
+  port: 80
+  version: 3
+
+api:
+  reboot_timeout: 0s #disable automatic when no HA connection - Defaults to 15 min
+
+globals:
+  - id: auto_batt_kw_filtered
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+
+  - id: auto_filter_initialized
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: auto_discharge_samples
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: auto_surplus_samples
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: auto_reenable_surplus_samples
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: auto_last_step_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  - id: auto_paused_low_pv
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: low_voltage_lockout
+    type: bool
+    restore_value: yes
+    initial_value: "false"
+
+  - id: low_voltage_below_seconds
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: low_voltage_trigger_voltage
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+
+  - id: internal_enable_change_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  - id: auto_current_change_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  - id: internal_current_change_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  - id: auto_soc_limiter_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+interval:
+  - interval: 100ms
+    then:
+      - lambda: |-
+          auto *cp_controller = esphome::evse_cp::get_cp_controller();
+          if (cp_controller != nullptr) {
+            cp_controller->update();
+          }
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (!id(ha_battery_voltage).has_state()) {
+            id(low_voltage_below_seconds) = 0;
+            return;
+          }
+          float cutoff_v = id(battery_low_voltage_cutoff).state;
+          if (!(cutoff_v == cutoff_v)) {
+            cutoff_v = 47.0f;
+          }
+          float batt_v = id(ha_battery_voltage).state;
+          if (!(batt_v == batt_v)) {
+            id(low_voltage_below_seconds) = 0;
+            return;
+          }
+          if (batt_v <= cutoff_v) {
+            id(low_voltage_below_seconds) += 1;
+          } else {
+            id(low_voltage_below_seconds) = 0;
+          }
+
+          if (id(low_voltage_below_seconds) >= 30) {
+            if (!id(low_voltage_lockout)) {
+              id(low_voltage_trigger_voltage) = batt_v;
+              id(event_low_voltage_cutoff).execute();
+            }
+            id(low_voltage_lockout) = true;
+            if (id(enable).state) {
+              id(internal_enable_change_last_ms) = millis();
+              id(enable).turn_off();
+              ESP_LOGW("battery_protect", "Low-voltage lockout after 30s: %.2fV <= %.2fV, charger disabled", batt_v, cutoff_v);
+            }
+          }
+  - interval: 5s
+    then:
+      - lambda: |-
+          id(sync_lcd_battery_gauge).execute();
+          int mode = static_cast<int>(id(charger_mode).state + 0.5f);
+          if (mode < 2 || mode > 3) {
+            id(auto_discharge_samples) = 0;
+            id(auto_surplus_samples) = 0;
+            id(auto_reenable_surplus_samples) = 0;
+            id(auto_paused_low_pv) = false;
+            id(auto_soc_limiter_active) = false;
+            return;
+          }
+          bool auto_no_minimum = (mode == 3);
+
+          if (id(low_voltage_lockout)) {
+            return;
+          }
+
+          if (!id(ha_battery_power).has_state()) {
+            return;
+          }
+
+          const float raw_batt_kw = id(ha_battery_power).state / 1000.0f;  // input is W: +charge, -discharge
+          float alpha = id(auto_filter_alpha).state;
+          if (!(alpha == alpha) || alpha <= 0.0f) {
+            alpha = 0.30f;
+          } else if (alpha > 1.0f) {
+            alpha = 1.0f;
+          }
+          if (!id(auto_filter_initialized)) {
+            id(auto_batt_kw_filtered) = raw_batt_kw;
+            id(auto_filter_initialized) = true;
+          } else {
+            id(auto_batt_kw_filtered) =
+                (alpha * raw_batt_kw) + ((1.0f - alpha) * id(auto_batt_kw_filtered));
+          }
+
+          bool force_charge = (mode == 3);
+          float battery_target_kw = force_charge ? id(force_charge_target_kw).state
+                                                 : id(normal_charge_target_kw).state;
+          if (!(battery_target_kw == battery_target_kw)) {
+            battery_target_kw = force_charge ? -3.0f : -1.0f;
+          }
+          // Battery power is signed: +charge, -discharge. Keep target at or below this value.
+          if (battery_target_kw > 0.0f) {
+            battery_target_kw = -battery_target_kw;
+          }
+          const float discharge_limit_kw = -battery_target_kw;
+          float heavy_margin_kw = id(auto_heavy_discharge_margin_kw).state;
+          if (!(heavy_margin_kw == heavy_margin_kw) || heavy_margin_kw < 0.0f) {
+            heavy_margin_kw = 0.30f;
+          }
+          float gentle_surplus_kw = id(auto_gentle_surplus_kw).state;
+          if (!(gentle_surplus_kw == gentle_surplus_kw)) {
+            gentle_surplus_kw = 0.20f;
+          }
+          float strong_surplus_kw = id(auto_strong_surplus_kw).state;
+          if (!(strong_surplus_kw == strong_surplus_kw)) {
+            strong_surplus_kw = 1.80f;
+          }
+          const float discharge_kw = id(auto_batt_kw_filtered) < 0.0f ? -id(auto_batt_kw_filtered) : 0.0f;
+          const uint32_t now = millis();
+          int cooldown_s = static_cast<int>(id(auto_step_cooldown_s).state + 0.5f);
+          if (cooldown_s < 1) {
+            cooldown_s = 12;
+          }
+          const uint32_t step_cooldown_ms = static_cast<uint32_t>(cooldown_s * 1000);
+
+          int reduce_samples = static_cast<int>(id(auto_reduce_samples).state + 0.5f);
+          if (reduce_samples < 1) {
+            reduce_samples = 2;
+          }
+          int increase_samples = static_cast<int>(id(auto_increase_samples).state + 0.5f);
+          if (increase_samples < 1) {
+            increase_samples = 4;
+          }
+          int pause_samples = static_cast<int>(id(auto_pause_samples).state + 0.5f);
+          if (pause_samples < 1) {
+            pause_samples = 12;
+          }
+          int resume_samples = static_cast<int>(id(auto_resume_samples).state + 0.5f);
+          if (resume_samples < 1) {
+            resume_samples = 18;
+          }
+
+          if (discharge_kw > discharge_limit_kw) {
+            id(auto_discharge_samples) += 1;
+          } else {
+            id(auto_discharge_samples) = 0;
+          }
+
+          // Normal mode ramps up only on positive battery charging surplus.
+          // Fast mode ramps up while discharge remains below the fast target.
+          const float fast_ramp_hysteresis_kw = 0.10f;
+          bool allow_increase_step = false;
+          if (force_charge) {
+            allow_increase_step = discharge_kw < (discharge_limit_kw - fast_ramp_hysteresis_kw);
+          } else {
+            allow_increase_step = id(auto_batt_kw_filtered) > gentle_surplus_kw;
+          }
+
+          if (allow_increase_step) {
+            id(auto_surplus_samples) += 1;
+          } else {
+            id(auto_surplus_samples) = 0;
+          }
+
+          if (id(auto_batt_kw_filtered) > strong_surplus_kw) {
+            id(auto_reenable_surplus_samples) += 1;
+          } else {
+            id(auto_reenable_surplus_samples) = 0;
+          }
+
+          float setpoint = id(current_setpoint).state;
+          if (!(setpoint == setpoint)) {
+            setpoint = 6.0f;
+          }
+          int setpoint_a = static_cast<int>(setpoint + 0.5f);
+
+          if (auto_no_minimum) {
+            // If already at minimum current and battery keeps discharging, pause charging.
+            if (setpoint_a <= 6 && id(auto_discharge_samples) >= pause_samples) {
+              if (id(enable).state) {
+                id(internal_enable_change_last_ms) = millis();
+                id(enable).turn_off();
+                id(auto_paused_low_pv) = true;
+                id(event_auto_enable_off).execute();
+                ESP_LOGI("pv_auto", "Paused charging: battery discharge %.2f kW", discharge_kw);
+              }
+            }
+
+            // Auto-resume only after sustained strong surplus.
+            if (id(auto_paused_low_pv) && !id(enable).state) {
+              if (id(auto_reenable_surplus_samples) >= resume_samples) {
+                id(internal_enable_change_last_ms) = millis();
+                id(enable).turn_on();
+                id(auto_paused_low_pv) = false;
+                id(event_auto_enable_on).execute();
+                id(auto_discharge_samples) = 0;
+                id(auto_last_step_ms) = now;
+                ESP_LOGI("pv_auto", "Resumed charging: filtered battery %.2f kW", id(auto_batt_kw_filtered));
+              }
+              return;
+            }
+          } else {
+            id(auto_paused_low_pv) = false;
+          }
+
+          if (!id(enable).state) {
+            return;
+          }
+
+          if ((now - id(auto_last_step_ms)) < step_cooldown_ms) {
+            return;
+          }
+
+          int delta_a = 0;
+          if (discharge_kw > (discharge_limit_kw + heavy_margin_kw) && id(auto_discharge_samples) >= reduce_samples) {
+            delta_a = -2;
+          } else if (discharge_kw > discharge_limit_kw && id(auto_discharge_samples) >= reduce_samples) {
+            delta_a = -1;
+          } else if (id(auto_surplus_samples) >= increase_samples) {
+            delta_a = 1;
+          }
+
+          float max_limit = id(max_current_limit).state;
+          if (!(max_limit == max_limit)) {
+            max_limit = 40.0f;
+          }
+          int max_limit_a = static_cast<int>(max_limit + 0.5f);
+          if (max_limit_a < 6) {
+            max_limit_a = 6;
+          } else if (max_limit_a > 40) {
+            max_limit_a = 40;
+          }
+
+          int soc_limit_a = max_limit_a;
+          if (id(ha_battery_soc).has_state()) {
+            float soc = id(ha_battery_soc).state;
+            if (soc == soc) {
+              soc = std::clamp(soc, 0.0f, 100.0f);
+              float min_soc_target = id(battery_target_min_soc).state;
+              if (!(min_soc_target == min_soc_target)) {
+                min_soc_target = 20.0f;
+              }
+              min_soc_target = std::clamp(min_soc_target, 0.0f, 100.0f);
+              const float ramp_window_soc = 10.0f;
+              const float ramp_start_soc = std::min(100.0f, min_soc_target + ramp_window_soc);
+              const float release_soc = std::min(100.0f, ramp_start_soc + 1.0f);  // 1% hysteresis
+
+              if (!id(auto_soc_limiter_active)) {
+                if (soc <= ramp_start_soc) {
+                  id(auto_soc_limiter_active) = true;
+                }
+              } else if (soc >= release_soc) {
+                id(auto_soc_limiter_active) = false;
+              }
+
+              if (id(auto_soc_limiter_active)) {
+                if (soc <= min_soc_target || ramp_start_soc <= min_soc_target) {
+                  soc_limit_a = 6;
+                } else {
+                  float ramp_ratio = (soc - min_soc_target) / (ramp_start_soc - min_soc_target);
+                  ramp_ratio = std::clamp(ramp_ratio, 0.0f, 1.0f);
+                  soc_limit_a = 6 + static_cast<int>(roundf(ramp_ratio * static_cast<float>(max_limit_a - 6)));
+                  soc_limit_a = std::clamp(soc_limit_a, 6, max_limit_a);
+                }
+              }
+            }
+          } else {
+            id(auto_soc_limiter_active) = false;
+          }
+
+          if (setpoint_a > soc_limit_a) {
+            int overshoot_a = setpoint_a - soc_limit_a;
+            int soc_delta_a = (overshoot_a >= 2) ? -2 : -1;
+            if (soc_delta_a < delta_a) {
+              delta_a = soc_delta_a;
+            }
+          }
+
+          if (delta_a == 0) {
+            return;
+          }
+
+          int new_setpoint_a = setpoint_a + delta_a;
+          if (new_setpoint_a < 6) {
+            new_setpoint_a = 6;
+          } else {
+            if (new_setpoint_a > max_limit_a) {
+              new_setpoint_a = max_limit_a;
+            }
+            if (new_setpoint_a > soc_limit_a) {
+              new_setpoint_a = soc_limit_a;
+            }
+          }
+
+          if (new_setpoint_a == setpoint_a) {
+            return;
+          }
+
+          auto setpoint_call = id(current_setpoint).make_call();
+          setpoint_call.set_value(new_setpoint_a);
+          id(auto_current_change_last_ms) = now;
+          setpoint_call.perform();
+          char event_msg[40];
+          snprintf(event_msg, sizeof(event_msg), "auto current set to %dA", new_setpoint_a);
+          id(event_flag).publish_state(event_msg);
+          id(event_auto_mode_change).execute();
+          id(auto_last_step_ms) = now;
+
+          ESP_LOGI("pv_auto", "Setpoint %dA -> %dA (battery %.2f kW)", setpoint_a, new_setpoint_a,
+                   id(auto_batt_kw_filtered));
+
+time:
+  - platform: homeassistant
+    id: system_time
+    on_time_sync:
+      - if: # Update the last restart time
+          condition:
+            lambda: 'return id(device_last_restart).state == "";'
+          then:
+            - text_sensor.template.publish:
+                id: device_last_restart
+                state: !lambda 'return id(system_time).now().strftime("%a %d %b %Y - %I:%M:%S %p");'
+      - script.execute: apply_backlight_day_night
+    on_time:
+      - seconds: 0
+        minutes: /5
+        then:
+          - script.execute: apply_backlight_day_night
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP Address
+
+  - platform: template
+    name: State Text Sensor Output
+    id: state_text_sensor_output
+    icon: mdi:information-outline
+    update_interval: 1s
+    lambda: |-
+      int mode = static_cast<int>(id(charger_mode).state + 0.5f);
+      float setpoint = id(current_setpoint).state;
+      if (!(setpoint == setpoint)) {
+        setpoint = 0.0f;
+      }
+      if (setpoint < 0.0f) {
+        setpoint = 0.0f;
+      }
+      int setpoint_a = static_cast<int>(setpoint + 0.5f);
+      float cutoff_v = id(battery_low_voltage_cutoff).state;
+      if (!(cutoff_v == cutoff_v)) {
+        cutoff_v = 47.0f;
+      }
+      bool lockout = id(low_voltage_lockout);
+      bool enabled = id(enable).state;
+      bool auto_paused = id(auto_paused_low_pv);
+      bool batt_v_valid = id(ha_battery_voltage).has_state();
+      float batt_v = batt_v_valid ? id(ha_battery_voltage).state : 0.0f;
+      if (!(batt_v == batt_v)) {
+        batt_v_valid = false;
+        batt_v = 0.0f;
+      }
+      bool batt_above_cutoff = batt_v_valid && batt_v > cutoff_v;
+      int below_seconds = id(low_voltage_below_seconds);
+      if (below_seconds < 0) {
+        below_seconds = 0;
+      }
+
+      if (mode <= 0) {
+        if (lockout) {
+          if (batt_above_cutoff) {
+            return {"Stopped - LV lockout latched"};
+          }
+          return {"Stopped - LV lockout active"};
+        }
+        return {"Stopped"};
+      }
+
+      if (mode > 3) {
+        return {"Unknown mode"};
+      }
+
+      if (mode == 1) {
+        if (lockout) {
+          if (batt_above_cutoff) {
+            return {"Manual Stopped - LV lockout latched"};
+          }
+          return {"Manual Stopped - LV lockout active"};
+        }
+        if (!enabled) {
+          if (below_seconds > 0 && batt_v_valid) {
+            char msg[88];
+            snprintf(msg, sizeof(msg), "Manual Stopped - LV guard %ds/30s (%.2fV)", below_seconds, batt_v);
+            return {msg};
+          }
+          return {"Manual Stopped"};
+        }
+        if (setpoint_a <= 0) {
+          return {"Manual Charging"};
+        }
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Manual Charging %dA", setpoint_a);
+        return {msg};
+      }
+
+      const bool fast_mode = (mode == 3);
+      const char *profile = fast_mode ? "Fast" : "Normal";
+
+      if (lockout) {
+        if (batt_above_cutoff) {
+          char msg[72];
+          snprintf(msg, sizeof(msg), "%s Paused - LV lockout latched", profile);
+          return {msg};
+        }
+        char msg[70];
+        snprintf(msg, sizeof(msg), "%s Paused - LV lockout active", profile);
+        return {msg};
+      }
+
+      if (!enabled) {
+        if (auto_paused) {
+          char msg[72];
+          snprintf(msg, sizeof(msg), "%s Paused - Wait for PV surplus", profile);
+          return {msg};
+        }
+        if (below_seconds > 0 && batt_v_valid) {
+          char msg[94];
+          snprintf(msg, sizeof(msg), "%s Paused - LV guard %ds/30s (%.2fV)", profile, below_seconds, batt_v);
+          return {msg};
+        }
+        char msg[32];
+        snprintf(msg, sizeof(msg), "%s Paused", profile);
+        return {msg};
+      }
+
+      if (setpoint_a <= 6) {
+        char msg[42];
+        snprintf(msg, sizeof(msg), "%s Charging %dA (Min)", profile, setpoint_a);
+        return {msg};
+      }
+
+      if (below_seconds > 0 && batt_v_valid) {
+        char msg[92];
+        snprintf(msg, sizeof(msg), "%s Charging %dA - LV guard %ds/30s (%.2fV)", profile, setpoint_a, below_seconds, batt_v);
+        return {msg};
+      }
+
+      char msg[44];
+      snprintf(msg, sizeof(msg), "%s Charging %dA", profile, setpoint_a);
+      return {msg};
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: label_machine_state
+            text: !lambda 'return x;'
+
+  - platform: template
+    name: Event Flag
+    id: event_flag
+    icon: mdi:flag
+    entity_category: diagnostic
+
+  - platform: template
+    name: Last Restart
+    id: device_last_restart
+    icon: mdi:clock
+    entity_category: diagnostic
+  
+  - platform: template
+    name: CP State
+    id: text_cp_state
+
+  - platform: template
+    name: HA Inputs Debug
+    id: ha_inputs_debug
+    icon: mdi:clipboard-text-outline
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: |-
+      float cutoff_v = id(battery_low_voltage_cutoff).state;
+      if (!(cutoff_v == cutoff_v)) {
+        cutoff_v = 47.0f;
+      }
+
+      bool has_v = id(ha_battery_voltage).has_state();
+      float batt_v = has_v ? id(ha_battery_voltage).state : 0.0f;
+      if (!(batt_v == batt_v)) {
+        has_v = false;
+        batt_v = 0.0f;
+      }
+
+      bool has_p = id(ha_battery_power).has_state();
+      float batt_p_w = has_p ? id(ha_battery_power).state : 0.0f;
+      if (!(batt_p_w == batt_p_w)) {
+        has_p = false;
+        batt_p_w = 0.0f;
+      }
+
+      bool has_soc = id(ha_battery_soc).has_state();
+      float batt_soc = has_soc ? id(ha_battery_soc).state : 0.0f;
+      if (!(batt_soc == batt_soc)) {
+        has_soc = false;
+        batt_soc = 0.0f;
+      }
+
+      char msg[220];
+      snprintf(
+          msg, sizeof(msg),
+          "mode:%d en:%d lock:%d below:%ds cut:%.2fV trig:%.2fV V:%.2f(%s) P:%.0f(%s) SOC:%.1f(%s)",
+          static_cast<int>(id(charger_mode).state + 0.5f),
+          id(enable).state ? 1 : 0,
+          id(low_voltage_lockout) ? 1 : 0,
+          id(low_voltage_below_seconds),
+          cutoff_v,
+          id(low_voltage_trigger_voltage),
+          batt_v,
+          has_v ? "ok" : "na",
+          batt_p_w,
+          has_p ? "ok" : "na",
+          batt_soc,
+          has_soc ? "ok" : "na");
+      return {msg};
+
+script:
+  - id: apply_backlight_day_night
+    mode: restart
+    then:
+      - lambda: |-
+          auto now = id(system_time).now();
+          int day_start_hour = static_cast<int>(id(backlight_day_start_hour).state + 0.5f);
+          int day_start_minute = static_cast<int>(id(backlight_day_start_minute).state + 0.5f);
+          int night_start_hour = static_cast<int>(id(backlight_night_start_hour).state + 0.5f);
+          int night_start_minute = static_cast<int>(id(backlight_night_start_minute).state + 0.5f);
+
+          day_start_hour = std::clamp(day_start_hour, 0, 23);
+          day_start_minute = std::clamp(day_start_minute, 0, 59);
+          night_start_hour = std::clamp(night_start_hour, 0, 23);
+          night_start_minute = std::clamp(night_start_minute, 0, 59);
+
+          const int day_start_total = day_start_hour * 60 + day_start_minute;
+          const int night_start_total = night_start_hour * 60 + night_start_minute;
+
+          bool is_daytime = true;
+          if (now.is_valid()) {
+            const int now_total = now.hour * 60 + now.minute;
+            if (day_start_total == night_start_total) {
+              is_daytime = true;
+            } else if (day_start_total < night_start_total) {
+              is_daytime = (now_total >= day_start_total && now_total < night_start_total);
+            } else {
+              // Supports schedules that cross midnight.
+              is_daytime = (now_total >= day_start_total || now_total < night_start_total);
+            }
+          }
+          auto call = id(display_backlight).turn_on();
+          call.set_brightness(is_daytime ? 1.0f : 0.5f);
+          call.perform();
+
+  - id: sync_lcd_power_gauge
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(power_arc) == nullptr || id(power_label) == nullptr) {
+            return;
+          }
+          // Outer ring: charger power 0..11 kW (same scale as the HA horseshoe card).
+          const float max_kw = 11.0f;
+          float kw = id(power).has_state() ? id(power).state : 0.0f;
+          if (!(kw == kw) || kw < 0.0f) {
+            kw = 0.0f;
+          }
+          const float arc_kw = std::min(kw, max_kw);
+          lv_arc_set_value(id(power_arc), static_cast<int32_t>(roundf(arc_kw * 100.0f)));
+
+          // HA "colorstop" style: use the colour of the highest stop at or below the value.
+          uint32_t ring_color = 0x2E7D32;  // 0 kW   green
+          if (kw >= 11.0f) {
+            ring_color = 0xC62828;         // 11 kW  red
+          } else if (kw >= 7.2f) {
+            ring_color = 0xEF6C00;         // 7.2 kW orange
+          } else if (kw >= 3.6f) {
+            ring_color = 0xF9A825;         // 3.6 kW amber
+          }
+          lv_obj_set_style_arc_color(id(power_arc), lv_color_hex(ring_color), LV_PART_INDICATOR);
+          lv_label_set_text(id(power_label), str_sprintf("%.2f", kw).c_str());
+
+  - id: sync_lcd_battery_gauge
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(battery_arc) == nullptr || id(net_power_label) == nullptr) {
+            return;
+          }
+          // Inner ring: house battery net power, -10..+10 kW drawn from the top
+          // (+ charging = green towards the right, - discharging = red towards the left).
+          const float min_kw = -10.0f;
+          const float max_kw = 10.0f;
+
+          bool valid = false;
+          float battery_kw = 0.0f;
+          if (id(ha_battery_power).has_state()) {
+            battery_kw = id(ha_battery_power).state / 1000.0f;  // W -> kW
+            valid = true;
+          } else if (id(ha_battery_power_filtered).has_state()) {
+            battery_kw = id(ha_battery_power_filtered).state;
+            valid = true;
+          }
+          if (!(battery_kw == battery_kw)) {
+            battery_kw = 0.0f;
+            valid = false;
+          }
+
+          const float arc_kw = std::clamp(battery_kw, min_kw, max_kw);
+          lv_arc_set_value(id(battery_arc), static_cast<int32_t>(roundf(arc_kw * 100.0f)));
+          const uint32_t ring_color = (battery_kw > 0.0f) ? 0x31FF00 : 0xFF1E1E;
+          lv_obj_set_style_arc_color(id(battery_arc), lv_color_hex(ring_color), LV_PART_INDICATOR);
+
+          if (valid) {
+            lv_label_set_text(id(net_power_label), str_sprintf("%.2f", battery_kw).c_str());
+          } else {
+            lv_label_set_text(id(net_power_label), "--");
+          }
+
+  - id: sync_lcd_mode_buttons
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(icon_mode_stop) == nullptr || id(icon_mode_normal) == nullptr || id(icon_mode_fast) == nullptr) {
+            return;
+          }
+          int mode = static_cast<int>(id(charger_mode).state + 0.5f);
+
+          // Same colours as the HA dashboard buttons; inactive icons are grey.
+          const lv_color_t inactive = lv_color_hex(0x8A8A8A);
+          lv_obj_set_style_text_color(id(icon_mode_stop), (mode == 0) ? lv_color_hex(0xFF5252) : inactive, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(icon_mode_normal), (mode == 2) ? lv_color_hex(0x42D66A) : inactive, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(icon_mode_fast), (mode == 3) ? lv_color_hex(0xFFB74D) : inactive, LV_PART_MAIN);
+
+  - id: apply_charger_mode
+    mode: restart
+    then:
+      - lambda: |-
+          int mode = static_cast<int>(id(charger_mode).state + 0.5f);
+          if (mode < 0) {
+            mode = 0;
+          } else if (mode > 3) {
+            mode = 3;
+          }
+
+          if (mode == 0) {
+            if (id(auto_mode).state) {
+              id(auto_mode).turn_off();
+            }
+            if (id(enable).state) {
+              id(internal_enable_change_last_ms) = millis();
+              id(enable).turn_off();
+            }
+            return;
+          }
+
+          if (mode == 1) {
+            if (id(auto_mode).state) {
+              id(auto_mode).turn_off();
+            }
+            if (!id(enable).state && !id(low_voltage_lockout)) {
+              id(internal_enable_change_last_ms) = millis();
+              id(enable).turn_on();
+            }
+            return;
+          }
+
+          if (mode == 2 || mode == 3) {
+            if (!id(auto_mode).state) {
+              id(auto_mode).turn_on();
+            }
+            if (!id(enable).state && !id(low_voltage_lockout)) {
+              id(internal_enable_change_last_ms) = millis();
+              id(enable).turn_on();
+            }
+            return;
+          }
+
+          if (id(auto_mode).state) {
+            id(auto_mode).turn_off();
+          }
+          if (!id(enable).state && !id(low_voltage_lockout)) {
+            id(internal_enable_change_last_ms) = millis();
+            id(enable).turn_on();
+          }
+      - script.execute: sync_lcd_mode_buttons
+
+  - id: event_low_voltage_cutoff
+    mode: restart
+    then:
+      - lambda: |-
+          float cutoff_v = id(battery_low_voltage_cutoff).state;
+          if (!(cutoff_v == cutoff_v)) {
+            cutoff_v = 47.0f;
+          }
+          char event_msg[88];
+          snprintf(event_msg, sizeof(event_msg), "low voltage cutoff %.2fV <= %.2fV for 30s", id(low_voltage_trigger_voltage), cutoff_v);
+          id(event_flag).publish_state(event_msg);
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_auto_mode_change
+    mode: restart
+    then:
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_auto_enable_off
+    mode: restart
+    then:
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "auto set enable off"
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_auto_enable_on
+    mode: restart
+    then:
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "auto set enable on"
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_ha_enable_on
+    mode: restart
+    then:
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "ha set enable on"
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_ha_enable_off
+    mode: restart
+    then:
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "ha set enable off"
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_ha_auto_mode_on
+    mode: restart
+    then:
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "ha set auto mode on"
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_ha_auto_mode_off
+    mode: restart
+    then:
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "ha set auto mode off"
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+  - id: event_ha_current_set
+    mode: restart
+    then:
+      - delay: 1s
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+
+select:
+  - platform: template
+    name: Charge Profile
+    id: charge_profile
+    options:
+      - "Normal"
+      - "Fast"
+    initial_option: "Normal"
+    restore_value: true
+    optimistic: true
+    set_action:
+      - lambda: |-
+          int mode = (x == "Fast") ? 3 : 2;
+          auto mode_call = id(charger_mode).make_call();
+          mode_call.set_value(mode);
+          mode_call.perform();
+      - script.execute: sync_lcd_mode_buttons
+
+number:
+  - platform: template
+    name: Charger Mode
+    id: charger_mode
+    min_value: 0
+    max_value: 3
+    step: 1
+    initial_value: 1
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    on_value:
+      then:
+        - lambda: |-
+            int mode = static_cast<int>(x + 0.5f);
+            if (mode == 3) {
+              id(charge_profile).publish_state("Fast");
+            } else if (mode == 2) {
+              id(charge_profile).publish_state("Normal");
+            }
+        - script.execute: apply_charger_mode
+
+  - platform: template
+    name: Backlight Day Start Hour
+    id: backlight_day_start_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 7
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+  - platform: template
+    name: Backlight Day Start Minute
+    id: backlight_day_start_minute
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+  - platform: template
+    name: Backlight Night Start Hour
+    id: backlight_night_start_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 19
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+  - platform: template
+    name: Backlight Night Start Minute
+    id: backlight_night_start_minute
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+  - platform: template
+    name: Car Battery Size
+    id: car_battery_size_kwh
+    unit_of_measurement: "kWh"
+    device_class: energy
+    min_value: 10
+    max_value: 200
+    step: 0.5
+    initial_value: ${car_battery_kwh_initial}
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - component.update: daily_percent
+        - component.update: daily_cost
+
+  - platform: template
+    name: Electricity Cost per kWh
+    id: electricity_cost_per_kwh
+    unit_of_measurement: "USD/kWh"
+    min_value: 0
+    max_value: 5
+    step: 0.01
+    initial_value: ${electricity_cost_initial}
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - component.update: daily_cost
+
+  - platform: template
+    unit_of_measurement: V
+    device_class: voltage
+    name: Battery Low Voltage Cutoff
+    id: battery_low_voltage_cutoff
+    min_value: 0
+    max_value: 60
+    step: 0.1
+    initial_value: 47.0
+    restore_value: true
+    optimistic: True
+    mode: BOX
+
+  - platform: template
+    unit_of_measurement: A
+    device_class: current
+    name: Max Current Limit
+    id: max_current_limit
+    min_value: 6
+    max_value: 40
+    step: 1
+    initial_value: ${max_current_initial}
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    on_value:
+      then:
+        - lambda: |-
+            float setpoint = id(current_setpoint).state;
+            if (!(setpoint == setpoint)) {
+              return;
+            }
+            if (setpoint > x) {
+              auto setpoint_call = id(current_setpoint).make_call();
+              setpoint_call.set_value(x);
+              id(internal_current_change_last_ms) = millis();
+              setpoint_call.perform();
+            }
+
+  - platform: template
+    unit_of_measurement: A
+    device_class: current
+    name: Current Setpoint
+    id: current_setpoint
+    min_value: 6 #minimum allowed by the standard is 5A - initial testing showed 5A = 0A on Nissan Leaf - maybe needs better calibration
+    max_value: 40 #set your max current here
+    step: 1
+    restore_value: true
+    optimistic: True
+    mode: BOX #display a box vs slider in the HA dashboard
+    on_value:
+      then:
+        - lambda: |-
+            uint32_t now = millis();
+            float max_limit = id(max_current_limit).state;
+            if (!(max_limit == max_limit)) {
+              max_limit = 40.0f;
+            }
+            if (max_limit < 6.0f) {
+              max_limit = 6.0f;
+            } else if (max_limit > 40.0f) {
+              max_limit = 40.0f;
+            }
+            if (x > max_limit) {
+              auto setpoint_call = id(current_setpoint).make_call();
+              setpoint_call.set_value(max_limit);
+              id(internal_current_change_last_ms) = now;
+              setpoint_call.perform();
+            }
+            if ((now - id(auto_current_change_last_ms)) < 1500 ||
+                (now - id(internal_current_change_last_ms)) < 1500) {
+              return;
+            }
+            int setpoint_a = static_cast<int>(x + 0.5f);
+            char event_msg[40];
+            snprintf(event_msg, sizeof(event_msg), "ha current set to %dA", setpoint_a);
+            id(event_flag).publish_state(event_msg);
+            id(event_ha_current_set).execute();
+
+  - platform: template
+    id: normal_charge_target_kw
+    name: "Normal Target"
+    unit_of_measurement: "kW"
+    step: 0.05
+    min_value: -1
+    max_value: 0
+    initial_value: -1.00
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: force_charge_target_kw
+    name: "Fast Target"
+    unit_of_measurement: "kW"
+    step: 0.1
+    min_value: -6
+    max_value: 0
+    initial_value: -3.00
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: battery_target_min_soc
+    name: "Battery Target Min SOC"
+    unit_of_measurement: "%"
+    step: 1
+    min_value: 5
+    max_value: 95
+    initial_value: 20
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_heavy_discharge_margin_kw
+    name: "PV Auto Heavy Discharge Margin"
+    unit_of_measurement: "kW"
+    step: 0.05
+    min_value: 0
+    max_value: 3
+    initial_value: 0.30
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_gentle_surplus_kw
+    name: "PV Auto Gentle Surplus"
+    unit_of_measurement: "kW"
+    step: 0.05
+    min_value: -2
+    max_value: 5
+    initial_value: 0.20
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_strong_surplus_kw
+    name: "PV Auto Strong Surplus"
+    unit_of_measurement: "kW"
+    step: 0.1
+    min_value: -2
+    max_value: 10
+    initial_value: 0.25
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_filter_alpha
+    name: "PV Auto Filter Alpha"
+    step: 0.01
+    min_value: 0.05
+    max_value: 1.00
+    initial_value: 0.30
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_step_cooldown_s
+    name: "PV Auto Step Cooldown"
+    unit_of_measurement: "s"
+    step: 1
+    min_value: 1
+    max_value: 120
+    initial_value: 12
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_reduce_samples
+    name: "PV Auto Reduce Samples"
+    step: 1
+    min_value: 1
+    max_value: 30
+    initial_value: 2
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_increase_samples
+    name: "PV Auto Increase Samples"
+    step: 1
+    min_value: 1
+    max_value: 30
+    initial_value: 4
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_pause_samples
+    name: "PV Auto Pause Samples"
+    step: 1
+    min_value: 1
+    max_value: 120
+    initial_value: 12
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: auto_resume_samples
+    name: "PV Auto Resume Samples"
+    step: 1
+    min_value: 1
+    max_value: 180
+    initial_value: 18
+    restore_value: true
+    optimistic: True
+
+  - platform: template
+    id: cp_state_machine
+    name: CP State Machine
+    internal: true
+    restore_value: False
+    initial_value: 0
+    min_value: 0
+    max_value: 4
+    step: 1
+    optimistic: True
+    entity_category: "diagnostic"
+    on_value:
+      lambda: !lambda |-
+        int index = x;
+        switch (index)
+        {
+          case 0:
+            id(text_cp_state).publish_state("Idle");
+            break;
+          case 1:
+            id(text_cp_state).publish_state("EV Connected");
+            break;
+          case 2:
+            id(text_cp_state).publish_state("EV Charging");
+            break;
+          case 3:
+            id(text_cp_state).publish_state("EV Vent");
+            break;
+          case 4:
+            id(text_cp_state).publish_state("Error");
+            break;
+        }
+
+
+sensor:
+
+  - platform: homeassistant
+    name: "HA Battery Power"
+    id: ha_battery_power
+    entity_id: ${ha_battery_power_id} # signed W sensor (+charging, -discharging)
+    on_value:
+      then:
+        - script.execute: sync_lcd_battery_gauge
+
+  - platform: homeassistant
+    name: "HA Battery Voltage"
+    id: ha_battery_voltage
+    entity_id: ${ha_battery_voltage_id}
+
+  - platform: homeassistant
+    name: "HA Battery SOC"
+    id: ha_battery_soc
+    entity_id: ${ha_battery_soc_id}
+    unit_of_measurement: "%"
+    device_class: battery
+
+  - platform: template
+    name: "HA Battery Power Filtered"
+    id: ha_battery_power_filtered
+    unit_of_measurement: "kW"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 3
+    lambda: |-
+      return id(auto_batt_kw_filtered);
+    update_interval: 5s
+    on_value:
+      then:
+        - script.execute: sync_lcd_battery_gauge
+
+  - platform: template
+    name: "Active Target"
+    id: active_target_kw
+    unit_of_measurement: "kW"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 2
+    lambda: |-
+      int mode = static_cast<int>(id(charger_mode).state + 0.5f);
+      if (mode == 3) {
+        return id(force_charge_target_kw).state;
+      }
+      return id(normal_charge_target_kw).state;
+    update_interval: 1s
+
+  - platform: adc
+    pin: 7
+    id: current_sensor_pin
+    accuracy_decimals: 5
+    attenuation: AUTO #0db
+    #name: Current Sensor ADC
+    entity_category: "diagnostic"
+
+  - platform: ct_clamp
+    sensor: current_sensor_pin
+    name: "Current Measured"
+    id: current_measured
+    accuracy_decimals: 2
+    sample_duration: 500ms
+    update_interval: 2000ms
+    filters: 
+      - calibrate_polynomial:
+          degree: 2
+          datapoints:
+          - ${current_cal_0}
+          - ${current_cal_1}
+          - ${current_cal_2}
+          - ${current_cal_3}
+          - ${current_cal_4}
+      - lambda: |-
+          return x < 1.0f ? 0.0f : x;
+  
+
+  - platform: template
+    name: Current Raw
+    internal: True 
+    accuracy_decimals: 5
+    entity_category: "diagnostic"
+    lambda: |-
+        return id(current_measured).raw_state;
+    update_interval: 1s
+
+  - platform: adc
+    pin: 6
+    id: voltage_sensor_pin
+    accuracy_decimals: 5
+    attenuation: auto #0db
+    #name: Voltage Sensor ADC
+    entity_category: "diagnostic"
+
+  - platform: ct_clamp #current sensor component can be used to measure voltage
+    sensor: voltage_sensor_pin
+    name: "Voltage"
+    unit_of_measurement: V
+    device_class: voltage
+    id: voltage
+    sample_duration: 500ms
+    update_interval: 2000ms
+    accuracy_decimals: 1
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 1
+          window_size: 30
+      - calibrate_polynomial:
+          degree: 2
+          datapoints:
+          - 0.0035 -> 0.0
+          - 0.246 -> 118.5
+          - 0.49437 -> 239.1
+
+  - platform: template
+    name: Voltage Raw
+    internal: True
+    accuracy_decimals: 5
+    entity_category: "diagnostic"
+    lambda: |-
+        return id(voltage).raw_state;
+    update_interval: 1s
+
+  - platform: template
+    name: Power
+    id: power
+    accuracy_decimals: 2
+    device_class: power
+    unit_of_measurement: kW
+    lambda: |-
+        return id(voltage).state * id(current_measured).state;
+    update_interval: 1s
+    filters: 
+      - multiply: 0.001 # scale to kW
+    on_value:
+      then:
+        - script.execute: sync_lcd_power_gauge
+
+
+  - platform: total_daily_energy
+    name: "Daily Energy"
+    id: daily_energy
+    power_id: power
+    accuracy_decimals: 2
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: daily_energy_label
+            text:
+              format: "%.2f"
+              args: [ x ]
+        - component.update: daily_percent
+        - component.update: daily_cost
+
+  - platform: template
+    name: "Daily Percent"
+    id: daily_percent
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+    lambda: |-
+      if (!id(daily_energy).has_state()) {
+        return NAN;
+      }
+      float battery_kwh = id(car_battery_size_kwh).state;
+      if (!(battery_kwh == battery_kwh) || battery_kwh <= 0.0f) {
+        return NAN;
+      }
+      return (id(daily_energy).state / battery_kwh) * 100.0f;
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: daily_percent_label
+            text: !lambda |-
+              if (!(x == x)) {
+                return std::string("--");
+              }
+              return str_sprintf("%.1f", x);
+
+  - platform: template
+    name: "Daily Cost"
+    id: daily_cost
+    unit_of_measurement: "USD"
+    device_class: monetary
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: never
+    lambda: |-
+      if (!id(daily_energy).has_state()) {
+        return NAN;
+      }
+      float usd_per_kwh = id(electricity_cost_per_kwh).state;
+      if (!(usd_per_kwh == usd_per_kwh) || usd_per_kwh < 0.0f) {
+        return NAN;
+      }
+      return id(daily_energy).state * usd_per_kwh;
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: daily_cost_label
+            text: !lambda |-
+              if (!(x == x)) {
+                return std::string("--");
+              }
+              return str_sprintf("%.2f", x);
+
+  - platform: ntc
+    sensor: ntc_resistance_sensor
+    calibration:
+      b_constant: 4460
+      reference_temperature: 25°C
+      reference_resistance: 10kOhm
+    name: Temperature PCB
+
+  - platform: resistance
+    id: ntc_resistance_sensor
+    sensor: ntc_sensor_pin
+    configuration: DOWNSTREAM
+    resistor: 5.6kOhm
+    #name: NTC Resistance #for debugging only
+    entity_category: "diagnostic"
+
+  - platform: adc
+    id: ntc_sensor_pin
+    pin: 5
+    #name: NTC ADC Pin #for debugging only
+    accuracy_decimals: 5
+    attenuation: auto #didnt seem to change anything
+    entity_category: "diagnostic"
+    
+  - platform: template
+    name: CP Output PWM Duty Cycle #for debugging only
+    accuracy_decimals: 5
+    id: cp_pwm_template
+    entity_category: "diagnostic"
+    on_value:
+      then:
+        - output.set_level:
+            id: cp_pwm_pin
+            level: !lambda 'return x;'
+  
+  - platform: adc
+    pin: 9
+    id: cp_sensor_pin
+    name: CP ADC Pin #for debugging only
+    accuracy_decimals: 5 #for display only
+    attenuation: 12db #fixed attentuation - not sure if necessary
+    update_interval: 1ms
+    entity_category: "diagnostic"
+    internal: true
+    filters:
+      - calibrate_polynomial: # convert raw values into actual voltage on the CP line - only for the high pwm cycle - any negative voltage below 0 will equal 0
+          degree: 2
+          datapoints:
+          - 0 -> 0
+          - 1.85 -> 5.66
+          - 2.2 -> 9
+          - 2.57 -> 12.56
+    on_value:
+      then:
+        lambda: !lambda |-
+          if (x > 3)
+          {
+            id(cp_sensor_high_average_v).publish_state(x);
+          }
+          else
+          {
+            id(cp_sensor_low_average_v).publish_state(x);
+          }
+
+  - platform: template
+    name: CP High State Average Voltage
+    internal: True
+    accuracy_decimals: 5
+    id: cp_sensor_high_average_v
+    entity_category: "diagnostic"
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 5
+          window_size: 5
+          send_first_at: 5
+    on_value:
+      then:
+        - lambda: |-
+            auto *cp_controller = esphome::evse_cp::get_cp_controller();
+            if (cp_controller != nullptr) {
+              cp_controller->set_cp_high_voltage(x);
+            }
+
+  - platform: template
+    name: CP Low State Average Voltage
+    internal: True
+    accuracy_decimals: 5
+    id: cp_sensor_low_average_v
+    entity_category: "diagnostic"
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 5
+          window_size: 5
+          send_first_at: 5
+    on_value:
+      then:
+        - lambda: |-
+            auto *cp_controller = esphome::evse_cp::get_cp_controller();
+            if (cp_controller != nullptr) {
+              cp_controller->set_cp_low_voltage(x);
+            }
+
+  - platform: internal_temperature
+    name: "Temperature ESP32"
+    id: temp_esp32
+
+output:
+  - platform: ledc # Duty cycle = amps / 0.6
+    pin: 15
+    id: cp_pwm_pin
+    frequency: "1000Hz"
+
+  - platform: ledc 
+    pin: GPIO1
+    id: backlight
+    frequency: "1000Hz"
+
+switch:
+  - platform: template
+    name: "Debug Error Mode"
+    id: debug_error
+    optimistic: true
+
+  - platform: gpio
+    pin: 14
+    id: relay
+    on_turn_on:
+      - binary_sensor.template.publish:
+          id: template_relay
+          state: ON
+    on_turn_off:
+      - binary_sensor.template.publish:
+          id: template_relay
+          state: OFF
+
+  - platform: template
+    name: Auto Mode
+    id: auto_mode
+    internal: true
+    optimistic: true
+    on_turn_on:
+      - lambda: |-
+          if (millis() < 5000) {
+            return;
+          }
+          id(event_ha_auto_mode_on).execute();
+    on_turn_off:
+      - lambda: |-
+          if (millis() < 5000) {
+            return;
+          }
+          id(event_ha_auto_mode_off).execute();
+
+  - platform: template
+    name: Charger Enabled
+    id: charger_enabled
+    icon: mdi:power
+    lambda: |-
+      int mode = static_cast<int>(id(charger_mode).state + 0.5f);
+      return mode > 0;
+    turn_on_action:
+      - lambda: |-
+          float cutoff_v = id(battery_low_voltage_cutoff).state;
+          if (!(cutoff_v == cutoff_v)) {
+            cutoff_v = 47.0f;
+          }
+
+          bool lockout_cleared = false;
+          if (id(low_voltage_lockout)) {
+            if (!id(ha_battery_voltage).has_state()) {
+              id(event_flag).publish_state("lockout clear blocked (no batt voltage)");
+              return;
+            }
+            float batt_v = id(ha_battery_voltage).state;
+            if (!(batt_v == batt_v)) {
+              id(event_flag).publish_state("lockout clear blocked (invalid batt voltage)");
+              return;
+            }
+            if (batt_v <= cutoff_v) {
+              id(low_voltage_trigger_voltage) = batt_v;
+              id(event_low_voltage_cutoff).execute();
+              return;
+            }
+            id(low_voltage_lockout) = false;
+            id(low_voltage_below_seconds) = 0;
+            lockout_cleared = true;
+          }
+
+          int current_mode = static_cast<int>(id(charger_mode).state + 0.5f);
+          if (current_mode > 0) {
+            if (lockout_cleared && !id(enable).state) {
+              id(internal_enable_change_last_ms) = millis();
+              id(enable).turn_on();
+            }
+            return;
+          }
+          int target_mode = 2;
+          if (id(charge_profile).current_option() == "Fast") {
+            target_mode = 3;
+          }
+          auto mode_call = id(charger_mode).make_call();
+          mode_call.set_value(target_mode);
+          mode_call.perform();
+    turn_off_action:
+      - lambda: |-
+          int current_mode = static_cast<int>(id(charger_mode).state + 0.5f);
+          if (current_mode == 0) {
+            return;
+          }
+          auto mode_call = id(charger_mode).make_call();
+          mode_call.set_value(0);
+          mode_call.perform();
+
+  - platform: template
+    name: Enable
+    id: enable
+    internal: true
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - lambda: |-
+          if (!id(low_voltage_lockout)) {
+            return;
+          }
+          float cutoff_v = id(battery_low_voltage_cutoff).state;
+          if (!(cutoff_v == cutoff_v)) {
+            cutoff_v = 47.0f;
+          }
+          if (!id(ha_battery_voltage).has_state()) {
+            id(internal_enable_change_last_ms) = millis();
+            id(enable).turn_off();
+            ESP_LOGW("battery_protect", "Enable blocked: voltage sensor unavailable while lockout active");
+            return;
+          }
+          if (id(ha_battery_voltage).state <= cutoff_v) {
+            id(low_voltage_trigger_voltage) = id(ha_battery_voltage).state;
+            id(event_low_voltage_cutoff).execute();
+            id(internal_enable_change_last_ms) = millis();
+            id(enable).turn_off();
+            ESP_LOGW("battery_protect", "Enable blocked: %.2fV <= %.2fV", id(ha_battery_voltage).state, cutoff_v);
+            return;
+          }
+          id(low_voltage_lockout) = false;
+          id(low_voltage_below_seconds) = 0;
+      - lambda: |-
+          if (!id(enable).state || millis() < 5000) {
+            return;
+          }
+          uint32_t now = millis();
+          if ((now - id(internal_enable_change_last_ms)) < 1500) {
+            return;
+          }
+          id(event_ha_enable_on).execute();
+    on_turn_off:
+      - lambda: |-
+          if (millis() < 5000) {
+            return;
+          }
+          uint32_t now = millis();
+          if ((now - id(internal_enable_change_last_ms)) < 1500) {
+            return;
+          }
+          id(event_ha_enable_off).execute();
+
+  - platform: lvgl
+    widget: btn_profile_normal
+    id: lcd_profile_normal
+    internal: true
+
+  - platform: lvgl
+    widget: btn_profile_force
+    id: lcd_profile_force
+    internal: true
+
+
+binary_sensor:
+  - platform: template
+    name: "AC Relay"
+    id: template_relay
+
+button:
+  - platform: restart
+    id: restart_device_internal
+    internal: true
+
+  - platform: template
+    name: "Stop"
+    icon: mdi:power-off
+    on_press:
+      - number.set:
+          id: charger_mode
+          value: 0
+
+  - platform: template
+    name: Manual
+    icon: mdi:hand-back-right-outline
+    on_press:
+      - number.set:
+          id: charger_mode
+          value: 1
+
+  - platform: template
+    name: Reboot Charger
+    id: reboot_charger
+    icon: mdi:restart
+    entity_category: config
+    on_press:
+      - button.press: restart_device_internal
+
+  - platform: template
+    name: Normal
+    on_press:
+      - select.set:
+          id: charge_profile
+          option: "Normal"
+
+  - platform: template
+    name: Fast
+    on_press:
+      - select.set:
+          id: charge_profile
+          option: "Fast"
+
+  - platform: template
+    name: Set 6A
+    icon: "mdi:emoticon-outline"
+    on_press:
+      - number.set:
+          id: current_setpoint
+          value: 6
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto24
+    size: 24
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto18
+    size: 18
+    bpp: 8
+
+  # Gauge typography (mirrors the HA flex-horseshoe card)
+  - file: "gfonts://Roboto"
+    id: roboto14
+    size: 14
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto16
+    size: 16
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto22
+    size: 22
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto64_num
+    size: 64
+    bpp: 8
+    glyphs: "0123456789.-"
+
+  - file: "gfonts://Roboto@bold"
+    id: roboto20_bold
+    size: 20
+    bpp: 8
+
+  # Material Design Icons used on the mode buttons (same icons as the HA dashboard)
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
+    id: mdi40
+    size: 40
+    bpp: 8
+    glyphs:
+      - "\U000F0425" # mdi:power
+      - "\U000F140B" # mdi:lightning-bolt
+      - "\U000F0241" # mdi:flash
+    
+light:
+  - platform: monochromatic
+    output: backlight
+    name: Display Backlight
+    id: display_backlight
+    restore_mode: ALWAYS_ON
+
+#-------------------------------------------
+# Touchscreen
+#-------------------------------------------
+
+i2c:
+  sda: 4
+  scl: 8
+  id: touchscreen_bus
+
+touchscreen:
+  - platform: axs15231
+    id: my_touchscreen
+    display: my_display
+    i2c_id: touchscreen_bus
+    # Native panel coords (320x480). LVGL rotation 270 remaps these to landscape.
+    # Do not swap/mirror here — that was only needed when rotation lived on the display.
+    calibration:
+      x_min: 0
+      x_max: 320
+      y_min: 0
+      y_max: 480
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: false
+    on_touch:
+      - lambda: |-
+          ESP_LOGI("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
+            touch.x,
+            touch.y,
+            touch.x_raw,
+            touch.y_raw
+          );
+          id(sync_lcd_mode_buttons).execute();
+
+#-------------------------------------------
+# Display axs15231 QSPI
+#-------------------------------------------
+
+spi:
+  id: display_qspi
+  type: quad
+  clk_pin: 47
+  data_pins: [21, 48, 40, 39]
+  
+display:
+  - platform: qspi_dbi
+    model: JC4832W535
+    data_rate: 40MHz
+    id: my_display
+    spi_id: display_qspi
+    dimensions:
+      height: 480
+      width: 320
+    cs_pin:
+      number: 45
+      ignore_strapping_warning: true
+    # Landscape is applied via lvgl.rotation (ESPHome 2026.x cannot rotate this display + LVGL together).
+    #draw_from_origin: true
+    #update_interval: never
+    auto_clear_enabled: false
+    #show_test_card: true # must enable update_interval, auto_clear_enable
+
+# Main LVGL section
+lvgl:
+  rotation: 270
+  displays:
+    - my_display
+  touchscreens:
+    - my_touchscreen
+  page_wrap: true
+  theme:
+    obj:
+      border_width: 0
+      pad_all: 0
+      bg_color: 0
+      text_color: white
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    label:
+      border_width: 0
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    image:
+      border_width: 0
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    button:
+      text_font: $text_font
+      scroll_on_focus: true
+      radius: 10px
+      shadow_width: 0 # This is required even though the default is supposed to be 0
+      checked:
+        bg_color: green
+        text_color: white
+
+# Main Page
+# Landscape 480x320 version of the HA horseshoe dashboard card:
+#   left  - flex-horseshoe style gauge (outer ring = charger power 0-11 kW,
+#           inner ring = house battery net power -10..+10 kW, bidirectional from the top)
+#           with NET / power / ADDED TODAY text inside and the charger state text
+#           centred underneath
+#   right - Stop / Normal / Fast mode buttons (mdi:power, mdi:lightning-bolt, mdi:flash)
+  pages:
+    - id: main_page
+      height: 320
+      width: 480
+      text_font: $text_font
+      scrollable: false
+      text_color: white
+      bg_color: 0
+      bg_opa: COVER
+      radius: 0
+      pad_all: 5
+      widgets:
+        # ---------------------------------------------------------------
+        # Gauge (left)
+        # ---------------------------------------------------------------
+        - obj:
+            id: gauge_box
+            align: TOP_LEFT
+            x: 8
+            y: 2
+            width: 300
+            height: 300
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            widgets:
+              # Outer ring: charger power (kW x 100), colour set by sync_lcd_power_gauge
+              - arc:
+                  id: power_arc
+                  align: CENTER
+                  width: 300
+                  height: 300
+                  pad_all: 0
+                  min_value: 0
+                  max_value: 1100
+                  value: 0
+                  start_angle: 135
+                  end_angle: 45
+                  mode: NORMAL
+                  adjustable: false
+                  arc_color: 0x303030
+                  arc_width: 18
+                  arc_rounded: false
+                  indicator:
+                    arc_color: 0x2E7D32
+                    arc_width: 18
+                    arc_rounded: false
+                  knob:
+                    bg_opa: 0%
+              # Inner ring: house battery net power (kW x 100), green = charging, red = discharging
+              - arc:
+                  id: battery_arc
+                  align: CENTER
+                  width: 252
+                  height: 252
+                  pad_all: 0
+                  min_value: -1000
+                  max_value: 1000
+                  value: 0
+                  start_angle: 135
+                  end_angle: 45
+                  mode: SYMMETRICAL
+                  adjustable: false
+                  arc_opa: TRANSP
+                  arc_width: 10
+                  arc_rounded: false
+                  indicator:
+                    arc_color: 0x31FF00
+                    arc_width: 10
+                    arc_rounded: false
+                  knob:
+                    bg_opa: 0%
+
+              # NET (house battery power)
+              - label:
+                  align: TOP_MID
+                  y: 42
+                  text: "NET"
+                  text_font: roboto16
+                  text_letter_space: 2
+                  text_color: 0xC8C8C8
+              - obj:
+                  align: TOP_MID
+                  y: 57
+                  width: 180
+                  height: 28
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollable: false
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: center
+                    flex_align_cross: start
+                    flex_align_track: start
+                    pad_column: 2
+                  widgets:
+                    - label:
+                        id: net_power_label
+                        text: "--"
+                        text_font: roboto22
+                        text_color: 0xD0D0D0
+                    - label:
+                        text: "kW"
+                        text_font: roboto14
+                        text_color: 0xC8C8C8
+
+              # Charger power (big number)
+              - obj:
+                  align: TOP_MID
+                  y: 76
+                  width: 290
+                  height: 78
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollable: false
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: center
+                    flex_align_cross: end
+                    flex_align_track: start
+                    pad_column: 6
+                  widgets:
+                    - label:
+                        id: power_label
+                        text: "0.00"
+                        text_font: roboto64_num
+                        text_color: 0xE6E6E6
+                    - label:
+                        text: "kW"
+                        text_font: roboto22
+                        text_color: 0xD0D0D0
+                        pad_bottom: 10 # sit the unit on the baseline of the big digits
+
+              # ADDED TODAY (values right-aligned to centre, units to the right)
+              - label:
+                  align: TOP_MID
+                  y: 150
+                  text: "ADDED TODAY"
+                  text_font: roboto16
+                  text_letter_space: 2
+                  text_color: 0xC8C8C8
+              - label:
+                  id: daily_energy_label
+                  align: TOP_MID
+                  x: -53
+                  y: 172
+                  width: 110
+                  text_align: RIGHT
+                  text: "0.00"
+                  text_font: roboto22
+                  text_color: 0xD0D0D0
+              - label:
+                  align: TOP_MID
+                  x: 44
+                  y: 172
+                  width: 60
+                  text_align: LEFT
+                  text: "kWh"
+                  text_font: roboto22
+                  text_color: 0xC8C8C8
+              - label:
+                  id: daily_cost_label
+                  align: TOP_MID
+                  x: -53
+                  y: 200
+                  width: 110
+                  text_align: RIGHT
+                  text: "0.00"
+                  text_font: roboto22
+                  text_color: 0xD0D0D0
+              - label:
+                  align: TOP_MID
+                  x: 44
+                  y: 200
+                  width: 60
+                  text_align: LEFT
+                  text: "$"
+                  text_font: roboto22
+                  text_color: 0xC8C8C8
+              - label:
+                  id: daily_percent_label
+                  align: TOP_MID
+                  x: -53
+                  y: 228
+                  width: 110
+                  text_align: RIGHT
+                  text: "0.0"
+                  text_font: roboto22
+                  text_color: 0xD0D0D0
+              - label:
+                  align: TOP_MID
+                  x: 44
+                  y: 228
+                  width: 60
+                  text_align: LEFT
+                  text: "%"
+                  text_font: roboto22
+                  text_color: 0xC8C8C8
+
+        # Charger mode / state text ("Normal Charging 32A"), centred under the gauge
+        - label:
+            id: label_machine_state
+            align: BOTTOM_LEFT
+            x: 0
+            y: -2
+            width: 316
+            long_mode: WRAP
+            text_align: CENTER
+            text: "--"
+            text_font: roboto20_bold
+            text_color: 0xE6E6E6
+
+        # ---------------------------------------------------------------
+        # Mode buttons (right) - icon colour is set by sync_lcd_mode_buttons
+        # ---------------------------------------------------------------
+        - button:
+            id: btn_mode_stop
+            align: TOP_RIGHT
+            x: 0
+            y: 5
+            width: 140
+            height: 92
+            radius: 12
+            bg_color: 0x2D2D2D
+            bg_opa: COVER
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            pressed:
+              bg_color: 0x4A4A4A
+            widgets:
+              - label:
+                  id: icon_mode_stop
+                  align: TOP_MID
+                  y: 12
+                  text: "\U000F0425" # mdi:power
+                  text_font: mdi40
+                  text_color: 0x8A8A8A
+              - label:
+                  align: BOTTOM_MID
+                  y: -10
+                  text: "Stop"
+                  text_font: roboto18
+                  text_color: white
+            on_short_click:
+              - number.set:
+                  id: charger_mode
+                  value: 0
+              - script.execute: sync_lcd_mode_buttons
+        - button:
+            id: btn_profile_normal
+            align: TOP_RIGHT
+            x: 0
+            y: 109
+            width: 140
+            height: 92
+            radius: 12
+            bg_color: 0x2D2D2D
+            bg_opa: COVER
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            pressed:
+              bg_color: 0x4A4A4A
+            widgets:
+              - label:
+                  id: icon_mode_normal
+                  align: TOP_MID
+                  y: 12
+                  text: "\U000F140B" # mdi:lightning-bolt
+                  text_font: mdi40
+                  text_color: 0x8A8A8A
+              - label:
+                  align: BOTTOM_MID
+                  y: -10
+                  text: "Normal"
+                  text_font: roboto18
+                  text_color: white
+            on_short_click:
+              - select.set:
+                  id: charge_profile
+                  option: "Normal"
+              - number.set:
+                  id: current_setpoint
+                  value: ${normal_setpoint_a}
+              - script.execute: sync_lcd_mode_buttons
+        - button:
+            id: btn_profile_force
+            align: TOP_RIGHT
+            x: 0
+            y: 213
+            width: 140
+            height: 92
+            radius: 12
+            bg_color: 0x2D2D2D
+            bg_opa: COVER
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            pressed:
+              bg_color: 0x4A4A4A
+            widgets:
+              - label:
+                  id: icon_mode_fast
+                  align: TOP_MID
+                  y: 12
+                  text: "\U000F0241" # mdi:flash
+                  text_font: mdi40
+                  text_color: 0x8A8A8A
+              - label:
+                  align: BOTTOM_MID
+                  y: -10
+                  text: "Fast"
+                  text_font: roboto18
+                  text_color: white
+            on_short_click:
+              - select.set:
+                  id: charge_profile
+                  option: "Fast"
+              - number.set:
+                  id: current_setpoint
+                  value: ${fast_setpoint_a}
+              - script.execute: sync_lcd_mode_buttons
