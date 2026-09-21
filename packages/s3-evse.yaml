@@ -9,8 +9,10 @@ substitutions:
   icon_font: roboto18
   text_font: roboto18
 
-  # Signed watts: positive is charging the house battery, negative is discharging.
+  # Signed power: positive is charging the house battery, negative is discharging.
+  # Divide by 1000 when the sensor is watts, or by 1 when it is already kilowatts.
   ha_battery_power_id: sensor.battery_power
+  ha_battery_power_divisor: "1000.0"
   ha_battery_voltage_id: sensor.battery_voltage
   ha_battery_soc_id: sensor.battery_state_of_charge
 
@@ -233,7 +235,7 @@ interval:
             return;
           }
 
-          const float raw_batt_kw = id(ha_battery_power).state / 1000.0f;  // input is W: +charge, -discharge
+          const float raw_batt_kw = id(ha_battery_power).state / ${ha_battery_power_divisor};  // +charge, -discharge
           float alpha = id(auto_filter_alpha).state;
           if (!(alpha == alpha) || alpha <= 0.0f) {
             alpha = 0.30f;
@@ -755,7 +757,7 @@ script:
           bool valid = false;
           float battery_kw = 0.0f;
           if (id(ha_battery_power).has_state()) {
-            battery_kw = id(ha_battery_power).state / 1000.0f;  // W -> kW
+            battery_kw = id(ha_battery_power).state / ${ha_battery_power_divisor};
             valid = true;
           } else if (id(ha_battery_power_filtered).has_state()) {
             battery_kw = id(ha_battery_power_filtered).state;

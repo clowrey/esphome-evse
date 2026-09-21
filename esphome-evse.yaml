@@ -10,9 +10,11 @@ substitutions:
   # ESPHome device comment.
   device_description: "EVSE based on Guition ESP32-S3-jc3248w535 320px X 480px Dev Board"
 
-  # House battery power, signed watts: +charging, -discharging.
+  # House battery power, signed: +charging, -discharging.
   # Normal and Fast modes step the charge current from this sensor.
   ha_battery_power_id: sensor.battery_power
+  # Divide the power sensor by this to get kW. 1000 for watts, 1 if the sensor is already kW.
+  ha_battery_power_divisor: "1000.0"
   # House battery voltage. Charging locks out after 30s at or below the cutoff (47 V unless changed on the device).
   ha_battery_voltage_id: sensor.battery_voltage
   # House battery state of charge, percent. Charge current is reduced as SOC falls toward the minimum target.

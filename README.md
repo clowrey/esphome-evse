@@ -29,7 +29,8 @@ The package uses these defaults when a device file leaves a substitution out. Va
 
 - `name` — hostname, for example `evse-0`. Entity ids use it with the hyphen turned into an underscore (`sensor.evse_0_power`). Leave this as `evse-0`, `evse-1`, and so on if you will have more than one EVSE. You can rename the device in Home Assistant afterward; that does not change the entity ids. Changing `name` in the YAML makes Home Assistant see a new device.
 - `device_description` — ESPHome device comment.
-- `ha_battery_power_id` — house battery power entity, signed watts: positive is charging the house battery, negative is discharging. Normal and Fast modes step the charge current from this sensor.
+- `ha_battery_power_id` — house battery power entity, signed: positive is charging the house battery, negative is discharging. Normal and Fast modes step the charge current from this sensor.
+- `ha_battery_power_divisor` — divide that sensor by this to get kilowatts. Use `1000` when the sensor is watts, and `1` when it is already kilowatts.
 - `ha_battery_voltage_id` — house battery voltage entity. Charging locks out after 30 seconds at or below the cutoff (47 V unless changed on the device).
 - `ha_battery_soc_id` — house battery state of charge, percent. Charge current is reduced as SOC falls toward the minimum target.
 - `current_cal_0` .. `current_cal_4` — CT clamp calibration, `raw reading -> amps`.
