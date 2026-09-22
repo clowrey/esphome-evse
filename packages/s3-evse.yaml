@@ -15,6 +15,10 @@ substitutions:
   ha_battery_power_divisor: "1000.0"
   ha_battery_voltage_id: sensor.battery_voltage
   ha_battery_soc_id: sensor.battery_state_of_charge
+  # 0 ignores a second battery. Set to 1 and set ha_battery_2_soc_id to include it.
+  # Charging uses the lower SOC of the batteries that are enabled.
+  ha_battery_2_enabled: "0"
+  ha_battery_2_soc_id: sensor.battery_2_state_of_charge
 
   # Raw CT reading -> amps. Replace these per installation.
   current_cal_0: "0.0160 -> 0.0"
@@ -243,44 +247,60 @@ interval:
           }
 
           // Stop charging at or below the house-battery minimum SOC.
+          // With two batteries, the lower SOC is the one that counts.
           // The 10% window above that target only reduces current; it does not stop.
+          bool has_house_soc = false;
+          float house_soc = 100.0f;
           if (id(ha_battery_soc).has_state()) {
-            float soc_now = id(ha_battery_soc).state;
-            if (soc_now == soc_now) {
-              soc_now = std::clamp(soc_now, 0.0f, 100.0f);
-              float min_soc_stop = id(battery_target_min_soc).state;
-              if (!(min_soc_stop == min_soc_stop)) {
-                min_soc_stop = 20.0f;
+            float raw = id(ha_battery_soc).state;
+            if (raw == raw) {
+              house_soc = std::clamp(raw, 0.0f, 100.0f);
+              has_house_soc = true;
+            }
+          }
+          if (${ha_battery_2_enabled} != 0 && id(ha_battery_2_soc).has_state()) {
+            float raw = id(ha_battery_2_soc).state;
+            if (raw == raw) {
+              raw = std::clamp(raw, 0.0f, 100.0f);
+              if (!has_house_soc || raw < house_soc) {
+                house_soc = raw;
               }
-              min_soc_stop = std::clamp(min_soc_stop, 0.0f, 100.0f);
-              const float soc_resume = std::min(100.0f, min_soc_stop + 1.0f);
+              has_house_soc = true;
+            }
+          }
+          if (has_house_soc) {
+            float min_soc_stop = id(battery_target_min_soc).state;
+            if (!(min_soc_stop == min_soc_stop)) {
+              min_soc_stop = 20.0f;
+            }
+            min_soc_stop = std::clamp(min_soc_stop, 0.0f, 100.0f);
+            const float soc_resume = std::min(100.0f, min_soc_stop + 1.0f);
 
-              if (soc_now <= min_soc_stop) {
-                id(auto_paused_low_soc) = true;
+            if (house_soc <= min_soc_stop) {
+              id(auto_paused_low_soc) = true;
+              if (id(enable).state) {
+                id(internal_enable_change_last_ms) = millis();
+                id(enable).turn_off();
+                id(event_flag).publish_state("paused low soc");
+                ESP_LOGW("battery_protect", "Paused charging: house SOC %.1f%% <= %.1f%%", house_soc, min_soc_stop);
+              }
+              return;
+            }
+
+            if (id(auto_paused_low_soc)) {
+              if (house_soc < soc_resume) {
                 if (id(enable).state) {
                   id(internal_enable_change_last_ms) = millis();
                   id(enable).turn_off();
-                  id(event_flag).publish_state("paused low soc");
-                  ESP_LOGW("battery_protect", "Paused charging: house SOC %.1f%% <= %.1f%%", soc_now, min_soc_stop);
                 }
                 return;
               }
-
-              if (id(auto_paused_low_soc)) {
-                if (soc_now < soc_resume) {
-                  if (id(enable).state) {
-                    id(internal_enable_change_last_ms) = millis();
-                    id(enable).turn_off();
-                  }
-                  return;
-                }
-                id(auto_paused_low_soc) = false;
-                if (!id(enable).state) {
-                  id(internal_enable_change_last_ms) = millis();
-                  id(enable).turn_on();
-                  id(event_flag).publish_state("resumed soc");
-                  ESP_LOGI("battery_protect", "Resumed charging: house SOC %.1f%% >= %.1f%%", soc_now, soc_resume);
-                }
+              id(auto_paused_low_soc) = false;
+              if (!id(enable).state) {
+                id(internal_enable_change_last_ms) = millis();
+                id(enable).turn_on();
+                id(event_flag).publish_state("resumed soc");
+                ESP_LOGI("battery_protect", "Resumed charging: house SOC %.1f%% >= %.1f%%", house_soc, soc_resume);
               }
             }
           }
@@ -444,10 +464,8 @@ interval:
           }
 
           int soc_limit_a = max_limit_a;
-          if (id(ha_battery_soc).has_state()) {
-            float soc = id(ha_battery_soc).state;
-            if (soc == soc) {
-              soc = std::clamp(soc, 0.0f, 100.0f);
+          if (has_house_soc) {
+            float soc = house_soc;
               float min_soc_target = id(battery_target_min_soc).state;
               if (!(min_soc_target == min_soc_target)) {
                 min_soc_target = 20.0f;
@@ -475,7 +493,6 @@ interval:
                   soc_limit_a = std::clamp(soc_limit_a, 6, max_limit_a);
                 }
               }
-            }
           } else {
             id(auto_soc_limiter_active) = false;
           }
@@ -631,7 +648,24 @@ text_sensor:
 
       if (!enabled) {
         if (id(auto_paused_low_soc)) {
-          float soc_now = id(ha_battery_soc).has_state() ? id(ha_battery_soc).state : 0.0f;
+          float soc_now = 0.0f;
+          bool has_soc = false;
+          if (id(ha_battery_soc).has_state()) {
+            float raw = id(ha_battery_soc).state;
+            if (raw == raw) {
+              soc_now = std::clamp(raw, 0.0f, 100.0f);
+              has_soc = true;
+            }
+          }
+          if (${ha_battery_2_enabled} != 0 && id(ha_battery_2_soc).has_state()) {
+            float raw = id(ha_battery_2_soc).state;
+            if (raw == raw) {
+              raw = std::clamp(raw, 0.0f, 100.0f);
+              if (!has_soc || raw < soc_now) {
+                soc_now = raw;
+              }
+            }
+          }
           char msg[72];
           snprintf(msg, sizeof(msg), "%s Paused - House SOC %.0f%%", profile, soc_now);
           return {msg};
@@ -1407,6 +1441,16 @@ sensor:
     state_class: measurement
     accuracy_decimals: 1
 
+  - platform: homeassistant
+    name: "HA Battery 2 SOC"
+    id: ha_battery_2_soc
+    internal: true
+    entity_id: ${ha_battery_2_soc_id}
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 1
+
   - platform: template
     name: "HA Battery Voltage Read"
     id: ha_battery_voltage_read
@@ -1438,6 +1482,24 @@ sensor:
         return NAN;
       }
       float soc = id(ha_battery_soc).state;
+      if (!(soc == soc)) {
+        return NAN;
+      }
+      return soc;
+
+  - platform: template
+    name: "HA Battery 2 SOC Read"
+    id: ha_battery_2_soc_read
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    lambda: |-
+      if (${ha_battery_2_enabled} == 0 || !id(ha_battery_2_soc).has_state()) {
+        return NAN;
+      }
+      float soc = id(ha_battery_2_soc).state;
       if (!(soc == soc)) {
         return NAN;
       }

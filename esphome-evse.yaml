@@ -19,7 +19,11 @@ substitutions:
   ha_battery_voltage_id: sensor.battery_voltage
   # House battery state of charge, percent. Current is reduced in the 10% above the minimum SOC.
   # At or below that minimum, Normal and Fast stop charging until SOC is 1% above it.
+  # The lower SOC is used when a second battery is enabled.
   ha_battery_soc_id: sensor.battery_state_of_charge
+  # 0 ignores a second battery. Set to 1 and set ha_battery_2_soc_id to include it.
+  ha_battery_2_enabled: "0"
+  ha_battery_2_soc_id: sensor.battery_2_state_of_charge
 
   # CT clamp calibration, raw reading -> amps.
   current_cal_0: "0.0160 -> 0.0"
