@@ -201,10 +201,6 @@ interval:
             id(low_voltage_below_seconds) = 0;
             return;
           }
-          float cutoff_v = id(battery_low_voltage_cutoff).state;
-          if (!(cutoff_v == cutoff_v)) {
-            cutoff_v = 47.0f;
-          }
           float batt_v = id(ha_battery_voltage).state;
           if (!(batt_v == batt_v)) {
             id(low_voltage_below_seconds) = 0;
