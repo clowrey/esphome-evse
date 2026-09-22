@@ -17,7 +17,8 @@ substitutions:
   ha_battery_power_divisor: "1000.0"
   # House battery voltage. Charging locks out after 30s at or below the cutoff (47 V unless changed on the device).
   ha_battery_voltage_id: sensor.battery_voltage
-  # House battery state of charge, percent. Charge current is reduced as SOC falls toward the minimum target.
+  # House battery state of charge, percent. Current is reduced in the 10% above the minimum SOC.
+  # At or below that minimum, Normal and Fast stop charging until SOC is 1% above it.
   ha_battery_soc_id: sensor.battery_state_of_charge
 
   # CT clamp calibration, raw reading -> amps.

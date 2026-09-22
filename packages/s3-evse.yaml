@@ -28,6 +28,8 @@ substitutions:
   fast_setpoint_a: "20"
   electricity_cost_initial: "0.55"
   car_battery_kwh_initial: "60.0"
+  # 0 disables low-voltage lockout. Any positive value is the cutoff in volts.
+  battery_low_voltage_cutoff_initial: "47"
 
 esphome:
   name: "${name}"
@@ -135,6 +137,11 @@ globals:
     restore_value: no
     initial_value: "false"
 
+  - id: auto_paused_low_soc
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
   - id: low_voltage_lockout
     type: bool
     restore_value: yes
@@ -181,6 +188,15 @@ interval:
   - interval: 1s
     then:
       - lambda: |-
+          float cutoff_v = id(battery_low_voltage_cutoff).state;
+          if (!(cutoff_v == cutoff_v)) {
+            cutoff_v = 47.0f;
+          }
+          if (cutoff_v <= 0.0f) {
+            id(low_voltage_below_seconds) = 0;
+            id(low_voltage_lockout) = false;
+            return;
+          }
           if (!id(ha_battery_voltage).has_state()) {
             id(low_voltage_below_seconds) = 0;
             return;
@@ -222,6 +238,7 @@ interval:
             id(auto_surplus_samples) = 0;
             id(auto_reenable_surplus_samples) = 0;
             id(auto_paused_low_pv) = false;
+            id(auto_paused_low_soc) = false;
             id(auto_soc_limiter_active) = false;
             return;
           }
@@ -229,6 +246,49 @@ interval:
 
           if (id(low_voltage_lockout)) {
             return;
+          }
+
+          // Stop charging at or below the house-battery minimum SOC.
+          // The 10% window above that target only reduces current; it does not stop.
+          if (id(ha_battery_soc).has_state()) {
+            float soc_now = id(ha_battery_soc).state;
+            if (soc_now == soc_now) {
+              soc_now = std::clamp(soc_now, 0.0f, 100.0f);
+              float min_soc_stop = id(battery_target_min_soc).state;
+              if (!(min_soc_stop == min_soc_stop)) {
+                min_soc_stop = 20.0f;
+              }
+              min_soc_stop = std::clamp(min_soc_stop, 0.0f, 100.0f);
+              const float soc_resume = std::min(100.0f, min_soc_stop + 1.0f);
+
+              if (soc_now <= min_soc_stop) {
+                id(auto_paused_low_soc) = true;
+                if (id(enable).state) {
+                  id(internal_enable_change_last_ms) = millis();
+                  id(enable).turn_off();
+                  id(event_flag).publish_state("paused low soc");
+                  ESP_LOGW("battery_protect", "Paused charging: house SOC %.1f%% <= %.1f%%", soc_now, min_soc_stop);
+                }
+                return;
+              }
+
+              if (id(auto_paused_low_soc)) {
+                if (soc_now < soc_resume) {
+                  if (id(enable).state) {
+                    id(internal_enable_change_last_ms) = millis();
+                    id(enable).turn_off();
+                  }
+                  return;
+                }
+                id(auto_paused_low_soc) = false;
+                if (!id(enable).state) {
+                  id(internal_enable_change_last_ms) = millis();
+                  id(enable).turn_on();
+                  id(event_flag).publish_state("resumed soc");
+                  ESP_LOGI("battery_protect", "Resumed charging: house SOC %.1f%% >= %.1f%%", soc_now, soc_resume);
+                }
+              }
+            }
           }
 
           if (!id(ha_battery_power).has_state()) {
@@ -576,6 +636,12 @@ text_sensor:
       }
 
       if (!enabled) {
+        if (id(auto_paused_low_soc)) {
+          float soc_now = id(ha_battery_soc).has_state() ? id(ha_battery_soc).state : 0.0f;
+          char msg[72];
+          snprintf(msg, sizeof(msg), "%s Paused - House SOC %.0f%%", profile, soc_now);
+          return {msg};
+        }
         if (auto_paused) {
           char msg[72];
           snprintf(msg, sizeof(msg), "%s Paused - Wait for PV surplus", profile);
@@ -1087,7 +1153,7 @@ number:
     min_value: 0
     max_value: 60
     step: 0.1
-    initial_value: 47.0
+    initial_value: ${battery_low_voltage_cutoff_initial}
     restore_value: true
     optimistic: True
     mode: BOX
@@ -1333,6 +1399,10 @@ sensor:
     name: "HA Battery Voltage"
     id: ha_battery_voltage
     entity_id: ${ha_battery_voltage_id}
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 2
 
   - platform: homeassistant
     name: "HA Battery SOC"
@@ -1340,6 +1410,44 @@ sensor:
     entity_id: ${ha_battery_soc_id}
     unit_of_measurement: "%"
     device_class: battery
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    name: "HA Battery Voltage Read"
+    id: ha_battery_voltage_read
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: 5s
+    lambda: |-
+      if (!id(ha_battery_voltage).has_state()) {
+        return NAN;
+      }
+      float volts = id(ha_battery_voltage).state;
+      if (!(volts == volts)) {
+        return NAN;
+      }
+      return volts;
+
+  - platform: template
+    name: "HA Battery SOC Read"
+    id: ha_battery_soc_read
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+    lambda: |-
+      if (!id(ha_battery_soc).has_state()) {
+        return NAN;
+      }
+      float soc = id(ha_battery_soc).state;
+      if (!(soc == soc)) {
+        return NAN;
+      }
+      return soc;
 
   - platform: template
     name: "HA Battery Power Filtered"
@@ -1695,6 +1803,10 @@ switch:
           if (!(cutoff_v == cutoff_v)) {
             cutoff_v = 47.0f;
           }
+          if (cutoff_v <= 0.0f) {
+            id(low_voltage_lockout) = false;
+            id(low_voltage_below_seconds) = 0;
+          }
 
           bool lockout_cleared = false;
           if (id(low_voltage_lockout)) {
@@ -1756,6 +1868,11 @@ switch:
           float cutoff_v = id(battery_low_voltage_cutoff).state;
           if (!(cutoff_v == cutoff_v)) {
             cutoff_v = 47.0f;
+          }
+          if (cutoff_v <= 0.0f) {
+            id(low_voltage_lockout) = false;
+            id(low_voltage_below_seconds) = 0;
+            return;
           }
           if (!id(ha_battery_voltage).has_state()) {
             id(internal_enable_change_last_ms) = millis();

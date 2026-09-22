@@ -32,7 +32,7 @@ The package uses these defaults when a device file leaves a substitution out. Va
 - `ha_battery_power_id` — house battery power entity, signed: positive is charging the house battery, negative is discharging. Normal and Fast modes step the charge current from this sensor.
 - `ha_battery_power_divisor` — divide that sensor by this to get kilowatts. Use `1000` when the sensor is watts, and `1` when it is already kilowatts.
 - `ha_battery_voltage_id` — house battery voltage entity. Charging locks out after 30 seconds at or below the cutoff (47 V unless changed on the device).
-- `ha_battery_soc_id` — house battery state of charge, percent. Charge current is reduced as SOC falls toward the minimum target.
+- `ha_battery_soc_id` — house battery state of charge, percent. Current is reduced in the 10% above the minimum SOC. At or below that minimum, Normal and Fast stop charging until SOC is 1% above it.
 - `current_cal_0` .. `current_cal_4` — CT clamp calibration, `raw reading -> amps`.
 - `max_current_initial` — first-boot Max Current Limit, amps. This is the ceiling. Current Setpoint is what the car is offered, and Normal and Fast step that setpoint between 6 A and this limit. 6 A is the floor because 5 A showed up as 0 A on a Leaf. After first boot, change Max Current Limit on the device.
 - `normal_setpoint_a` — LCD Normal button only. It selects Normal and sets Current Setpoint to this many amps, which is the floor the ramp starts from. Auto then raises it when the house battery is charging and lowers it when discharge passes the Normal target. The Home Assistant Normal button changes mode only.
