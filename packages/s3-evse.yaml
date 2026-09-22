@@ -373,12 +373,21 @@ interval:
           }
 
           // 0 idle, 1 EV connected, 2 charging, 3 vent, 4 error.
-          // Do not move the offered current while no vehicle is connected.
+          // Offered current stays put unless a vehicle is connected, and idle returns it to 6 A.
           int cp_state = static_cast<int>(id(cp_state_machine).state + 0.5f);
           if (cp_state != 1 && cp_state != 2) {
             id(auto_discharge_samples) = 0;
             id(auto_surplus_samples) = 0;
             id(auto_reenable_surplus_samples) = 0;
+            if (cp_state == 0) {
+              float setpoint = id(current_setpoint).state;
+              if (!(setpoint == setpoint) || setpoint > 6.5f) {
+                auto call = id(current_setpoint).make_call();
+                call.set_value(6.0f);
+                id(internal_current_change_last_ms) = millis();
+                call.perform();
+              }
+            }
             return;
           }
 
@@ -1407,6 +1416,15 @@ number:
         {
           case 0:
             id(text_cp_state).publish_state("Idle");
+            {
+              float setpoint = id(current_setpoint).state;
+              if (!(setpoint == setpoint) || setpoint > 6.5f) {
+                auto call = id(current_setpoint).make_call();
+                call.set_value(6.0f);
+                id(internal_current_change_last_ms) = millis();
+                call.perform();
+              }
+            }
             break;
           case 1:
             id(text_cp_state).publish_state("EV Connected");
