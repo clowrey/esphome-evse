@@ -372,6 +372,16 @@ interval:
             resume_samples = 18;
           }
 
+          // 0 idle, 1 EV connected, 2 charging, 3 vent, 4 error.
+          // Do not move the offered current while no vehicle is connected.
+          int cp_state = static_cast<int>(id(cp_state_machine).state + 0.5f);
+          if (cp_state != 1 && cp_state != 2) {
+            id(auto_discharge_samples) = 0;
+            id(auto_surplus_samples) = 0;
+            id(auto_reenable_surplus_samples) = 0;
+            return;
+          }
+
           if (discharge_kw > discharge_limit_kw) {
             id(auto_discharge_samples) += 1;
           } else {
