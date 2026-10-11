@@ -212,7 +212,9 @@ class EvseCpController : public PollingComponent {
 
       case State::STATE_D_VENT:
         // Ventilation-required charging is unsupported in this setup.
-        target_pwm = 0.0f;
+        // Hold a steady +12V rather than -12V so the high side is still sampled
+        // and the state can leave D; at 0% duty it never would.
+        target_pwm = 1.0f;
         target_relay_on = false;
         break;
 

@@ -1791,8 +1791,10 @@ sensor:
     accuracy_decimals: 5
     id: cp_sensor_high_average_v
     entity_category: "diagnostic"
-    filters: 
-      - sliding_window_moving_average: 
+    # Max, not average: at low duty, samples caught on a pilot edge read low and
+    # averaged together they can look like State D.
+    filters:
+      - max:
           send_every: 5
           window_size: 5
           send_first_at: 5
