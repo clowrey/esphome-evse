@@ -1,0 +1,111 @@
+# Board, framework, networking and time for the Guition ESP32-S3-jc3248w535 EVSE.
+# Included by packages/s3-evse.yaml.
+
+esphome:
+  name: "${name}"
+  comment: "${device_description}"
+  min_version: 2024.11.0
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          auto *cp_controller = new esphome::evse_cp::EvseCpController(100);
+          cp_controller->set_cp_pwm_output(id(cp_pwm_pin));
+          cp_controller->set_cp_pwm_sensor(id(cp_pwm_template));
+          cp_controller->set_cp_state_number(id(cp_state_machine));
+          cp_controller->set_current_setpoint_number(id(current_setpoint));
+          cp_controller->set_enable_switch(id(enable));
+          cp_controller->set_debug_error_switch(id(debug_error));
+          cp_controller->set_relay_switch(id(relay));
+          esphome::evse_cp::set_cp_controller(cp_controller);
+          cp_controller->setup();
+      - text_sensor.template.publish:
+          id: event_flag
+          state: "idle"
+      - script.execute: apply_charger_mode
+      - script.execute: apply_backlight_day_night
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      COMPILER_OPTIMIZATION_SIZE: y
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
+      CONFIG_SPIRAM_RODATA: y
+
+preferences:
+  flash_write_interval: 1min
+
+external_components:
+  # components_source is a substitution so a device file can build from a local checkout.
+  - source: ${components_source}
+    components: [evse_cp]
+    refresh: 0s
+
+# axs15231 is built into ESPHome 2026.7; the old PR overlay no longer compiles.
+
+psram:
+  mode: octal
+  speed: 80MHz #cant go faster than 80 will revert to 40
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  reboot_timeout: 0s #disable automatic reboot if no wifi - Defaults to 15min - Does not apply when in access point mode.
+
+web_server:
+  port: 80
+  version: 3
+
+api:
+  reboot_timeout: 0s #disable automatic when no HA connection - Defaults to 15 min
+
+time:
+  - platform: homeassistant
+    id: system_time
+    on_time_sync:
+      - if: # Update the last restart time
+          condition:
+            lambda: 'return id(device_last_restart).state == "";'
+          then:
+            - text_sensor.template.publish:
+                id: device_last_restart
+                state: !lambda 'return id(system_time).now().strftime("%a %d %b %Y - %I:%M:%S %p");'
+      - script.execute: apply_backlight_day_night
+    on_time:
+      - seconds: 0
+        minutes: /5
+        then:
+          - script.execute: apply_backlight_day_night
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP Address
+
+  - platform: template
+    name: Last Restart
+    id: device_last_restart
+    icon: mdi:clock
+    entity_category: diagnostic
+
+button:
+  - platform: restart
+    id: restart_device_internal
+    internal: true
+
+  - platform: template
+    name: Reboot Charger
+    id: reboot_charger
+    icon: mdi:restart
+    entity_category: config
+    on_press:
+      - button.press: restart_device_internal

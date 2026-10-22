@@ -1,0 +1,246 @@
+# J1772 control pilot: evse_cp component wiring, CP sensing, pilot PWM, relay and the offered current.
+# Included by packages/s3-evse.yaml.
+
+evse_cp:
+
+interval:
+  - interval: 100ms
+    then:
+      - lambda: |-
+          auto *cp_controller = esphome::evse_cp::get_cp_controller();
+          if (cp_controller != nullptr) {
+            cp_controller->update();
+          }
+
+text_sensor:
+  - platform: template
+    name: CP State
+    id: text_cp_state
+
+number:
+  - platform: template
+    unit_of_measurement: A
+    device_class: current
+    name: Max Current Limit
+    id: max_current_limit
+    min_value: 6
+    max_value: 40
+    step: 1
+    initial_value: ${max_current_initial}
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    on_value:
+      then:
+        - lambda: |-
+            float setpoint = id(current_setpoint).state;
+            if (!(setpoint == setpoint)) {
+              return;
+            }
+            if (setpoint > x) {
+              auto setpoint_call = id(current_setpoint).make_call();
+              setpoint_call.set_value(x);
+              id(internal_current_change_last_ms) = millis();
+              setpoint_call.perform();
+            }
+
+  - platform: template
+    unit_of_measurement: A
+    device_class: current
+    name: Current Setpoint
+    id: current_setpoint
+    min_value: 6 #minimum allowed by the standard is 5A - initial testing showed 5A = 0A on Nissan Leaf - maybe needs better calibration
+    max_value: 40 #set your max current here
+    step: 1
+    restore_value: true
+    optimistic: True
+    mode: BOX #display a box vs slider in the HA dashboard
+    on_value:
+      then:
+        - lambda: |-
+            uint32_t now = millis();
+            float max_limit = id(max_current_limit).state;
+            if (!(max_limit == max_limit)) {
+              max_limit = 40.0f;
+            }
+            if (max_limit < 6.0f) {
+              max_limit = 6.0f;
+            } else if (max_limit > 40.0f) {
+              max_limit = 40.0f;
+            }
+            if (x > max_limit) {
+              auto setpoint_call = id(current_setpoint).make_call();
+              setpoint_call.set_value(max_limit);
+              id(internal_current_change_last_ms) = now;
+              setpoint_call.perform();
+            }
+            if ((now - id(auto_current_change_last_ms)) < 1500 ||
+                (now - id(internal_current_change_last_ms)) < 1500) {
+              return;
+            }
+            int setpoint_a = static_cast<int>(x + 0.5f);
+            char event_msg[40];
+            snprintf(event_msg, sizeof(event_msg), "ha current set to %dA", setpoint_a);
+            id(event_flag).publish_state(event_msg);
+            id(event_ha_current_set).execute();
+
+  - platform: template
+    id: cp_state_machine
+    name: CP State Machine
+    internal: true
+    restore_value: False
+    initial_value: 0
+    min_value: 0
+    max_value: 4
+    step: 1
+    optimistic: True
+    entity_category: "diagnostic"
+    on_value:
+      lambda: !lambda |-
+        int index = x;
+        switch (index)
+        {
+          case 0:
+            id(text_cp_state).publish_state("Idle");
+            {
+              float setpoint = id(current_setpoint).state;
+              if (!(setpoint == setpoint) || setpoint > 6.5f) {
+                auto call = id(current_setpoint).make_call();
+                call.set_value(6.0f);
+                id(internal_current_change_last_ms) = millis();
+                call.perform();
+              }
+            }
+            break;
+          case 1:
+            id(text_cp_state).publish_state("EV Connected");
+            break;
+          case 2:
+            id(text_cp_state).publish_state("EV Charging");
+            break;
+          case 3:
+            id(text_cp_state).publish_state("EV Vent");
+            break;
+          case 4:
+            id(text_cp_state).publish_state("Error");
+            break;
+        }
+
+sensor:
+  - platform: template
+    name: CP Output PWM Duty Cycle #for debugging only
+    accuracy_decimals: 5
+    id: cp_pwm_template
+    entity_category: "diagnostic"
+    on_value:
+      then:
+        - output.set_level:
+            id: cp_pwm_pin
+            level: !lambda 'return x;'
+
+  - platform: adc
+    pin: 9
+    id: cp_sensor_pin
+    name: CP ADC Pin #for debugging only
+    accuracy_decimals: 5 #for display only
+    attenuation: 12db #fixed attentuation - not sure if necessary
+    update_interval: 1ms
+    entity_category: "diagnostic"
+    internal: true
+    filters:
+      - calibrate_polynomial: # convert raw values into actual voltage on the CP line - only for the high pwm cycle - any negative voltage below 0 will equal 0
+          degree: 2
+          datapoints:
+          - 0 -> 0
+          - 1.85 -> 5.66
+          - 2.2 -> 9
+          - 2.57 -> 12.56
+    on_value:
+      then:
+        lambda: !lambda |-
+          if (x > 3)
+          {
+            id(cp_sensor_high_average_v).publish_state(x);
+          }
+          else
+          {
+            id(cp_sensor_low_average_v).publish_state(x);
+          }
+
+  - platform: template
+    name: CP High State Average Voltage
+    internal: True
+    accuracy_decimals: 5
+    id: cp_sensor_high_average_v
+    entity_category: "diagnostic"
+    # Max, not average: at low duty, samples caught on a pilot edge read low and
+    # averaged together they can look like State D.
+    filters:
+      - max:
+          send_every: 5
+          window_size: 5
+          send_first_at: 5
+    on_value:
+      then:
+        - lambda: |-
+            auto *cp_controller = esphome::evse_cp::get_cp_controller();
+            if (cp_controller != nullptr) {
+              cp_controller->set_cp_high_voltage(x);
+            }
+
+  - platform: template
+    name: CP Low State Average Voltage
+    internal: True
+    accuracy_decimals: 5
+    id: cp_sensor_low_average_v
+    entity_category: "diagnostic"
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 5
+          window_size: 5
+          send_first_at: 5
+    on_value:
+      then:
+        - lambda: |-
+            auto *cp_controller = esphome::evse_cp::get_cp_controller();
+            if (cp_controller != nullptr) {
+              cp_controller->set_cp_low_voltage(x);
+            }
+
+output:
+  - platform: ledc # Duty cycle = amps / 0.6
+    pin: 15
+    id: cp_pwm_pin
+    frequency: "1000Hz"
+
+switch:
+  - platform: template
+    name: "Debug Error Mode"
+    id: debug_error
+    optimistic: true
+
+  - platform: gpio
+    pin: 14
+    id: relay
+    on_turn_on:
+      - binary_sensor.template.publish:
+          id: template_relay
+          state: ON
+    on_turn_off:
+      - binary_sensor.template.publish:
+          id: template_relay
+          state: OFF
+
+binary_sensor:
+  - platform: template
+    name: "AC Relay"
+    id: template_relay
+
+button:
+  - platform: template
+    name: Set 6A
+    icon: "mdi:emoticon-outline"
+    on_press:
+      - number.set:
+          id: current_setpoint
+          value: 6

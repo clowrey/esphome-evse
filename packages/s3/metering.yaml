@@ -1,0 +1,223 @@
+# Metering: CT clamp current, line voltage, power, daily energy/cost/percent and temperatures.
+# Included by packages/s3-evse.yaml.
+
+number:
+  - platform: template
+    name: Car Battery Size
+    id: car_battery_size_kwh
+    unit_of_measurement: "kWh"
+    device_class: energy
+    min_value: 10
+    max_value: 200
+    step: 0.5
+    initial_value: ${car_battery_kwh_initial}
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - component.update: daily_percent
+        - component.update: daily_cost
+
+  - platform: template
+    name: Electricity Cost per kWh
+    id: electricity_cost_per_kwh
+    unit_of_measurement: "USD/kWh"
+    min_value: 0
+    max_value: 5
+    step: 0.01
+    initial_value: ${electricity_cost_initial}
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - component.update: daily_cost
+
+sensor:
+  - platform: adc
+    pin: 7
+    id: current_sensor_pin
+    accuracy_decimals: 5
+    attenuation: AUTO #0db
+    #name: Current Sensor ADC
+    entity_category: "diagnostic"
+
+  - platform: ct_clamp
+    sensor: current_sensor_pin
+    name: "Current Measured"
+    id: current_measured
+    accuracy_decimals: 2
+    sample_duration: 500ms
+    update_interval: 2000ms
+    filters: 
+      - calibrate_polynomial:
+          degree: 2
+          datapoints:
+          - ${current_cal_0}
+          - ${current_cal_1}
+          - ${current_cal_2}
+          - ${current_cal_3}
+          - ${current_cal_4}
+      - lambda: |-
+          return x < 1.0f ? 0.0f : x;
+
+  - platform: template
+    name: Current Raw
+    internal: True 
+    accuracy_decimals: 5
+    entity_category: "diagnostic"
+    lambda: |-
+        return id(current_measured).raw_state;
+    update_interval: 1s
+
+  - platform: adc
+    pin: 6
+    id: voltage_sensor_pin
+    accuracy_decimals: 5
+    attenuation: auto #0db
+    #name: Voltage Sensor ADC
+    entity_category: "diagnostic"
+
+  - platform: ct_clamp #current sensor component can be used to measure voltage
+    sensor: voltage_sensor_pin
+    name: "Voltage"
+    unit_of_measurement: V
+    device_class: voltage
+    id: voltage
+    sample_duration: 500ms
+    update_interval: 2000ms
+    accuracy_decimals: 1
+    filters: 
+      - sliding_window_moving_average: 
+          send_every: 1
+          window_size: 30
+      - calibrate_polynomial:
+          degree: 2
+          datapoints:
+          - 0.0035 -> 0.0
+          - 0.246 -> 118.5
+          - 0.49437 -> 239.1
+
+  - platform: template
+    name: Voltage Raw
+    internal: True
+    accuracy_decimals: 5
+    entity_category: "diagnostic"
+    lambda: |-
+        return id(voltage).raw_state;
+    update_interval: 1s
+
+  - platform: template
+    name: Power
+    id: power
+    accuracy_decimals: 2
+    device_class: power
+    unit_of_measurement: kW
+    lambda: |-
+        return id(voltage).state * id(current_measured).state;
+    update_interval: 1s
+    filters: 
+      - multiply: 0.001 # scale to kW
+    on_value:
+      then:
+        - script.execute: sync_lcd_power_gauge
+
+  - platform: total_daily_energy
+    name: "Daily Energy"
+    id: daily_energy
+    power_id: power
+    accuracy_decimals: 2
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: daily_energy_label
+            text:
+              format: "%.2f"
+              args: [ x ]
+        - component.update: daily_percent
+        - component.update: daily_cost
+
+  - platform: template
+    name: "Daily Percent"
+    id: daily_percent
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+    lambda: |-
+      if (!id(daily_energy).has_state()) {
+        return NAN;
+      }
+      float battery_kwh = id(car_battery_size_kwh).state;
+      if (!(battery_kwh == battery_kwh) || battery_kwh <= 0.0f) {
+        return NAN;
+      }
+      return (id(daily_energy).state / battery_kwh) * 100.0f;
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: daily_percent_label
+            text: !lambda |-
+              if (!(x == x)) {
+                return std::string("--");
+              }
+              return str_sprintf("%.1f", x);
+
+  - platform: template
+    name: "Daily Cost"
+    id: daily_cost
+    unit_of_measurement: "USD"
+    device_class: monetary
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: never
+    lambda: |-
+      if (!id(daily_energy).has_state()) {
+        return NAN;
+      }
+      float usd_per_kwh = id(electricity_cost_per_kwh).state;
+      if (!(usd_per_kwh == usd_per_kwh) || usd_per_kwh < 0.0f) {
+        return NAN;
+      }
+      return id(daily_energy).state * usd_per_kwh;
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: daily_cost_label
+            text: !lambda |-
+              if (!(x == x)) {
+                return std::string("--");
+              }
+              return str_sprintf("%.2f", x);
+
+  - platform: ntc
+    sensor: ntc_resistance_sensor
+    calibration:
+      b_constant: 4460
+      reference_temperature: 25°C
+      reference_resistance: 10kOhm
+    name: Temperature PCB
+
+  - platform: resistance
+    id: ntc_resistance_sensor
+    sensor: ntc_sensor_pin
+    configuration: DOWNSTREAM
+    resistor: 5.6kOhm
+    #name: NTC Resistance #for debugging only
+    entity_category: "diagnostic"
+
+  - platform: adc
+    id: ntc_sensor_pin
+    pin: 5
+    #name: NTC ADC Pin #for debugging only
+    accuracy_decimals: 5
+    attenuation: auto #didnt seem to change anything
+    entity_category: "diagnostic"
+
+  - platform: internal_temperature
+    name: "Temperature ESP32"
+    id: temp_esp32

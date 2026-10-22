@@ -1,0 +1,674 @@
+# LCD: fonts, touchscreen, display, backlight schedule and the LVGL main page.
+# Included by packages/s3-evse.yaml.
+
+script:
+  - id: apply_backlight_day_night
+    mode: restart
+    then:
+      - lambda: |-
+          auto now = id(system_time).now();
+          int day_start_hour = static_cast<int>(id(backlight_day_start_hour).state + 0.5f);
+          int day_start_minute = static_cast<int>(id(backlight_day_start_minute).state + 0.5f);
+          int night_start_hour = static_cast<int>(id(backlight_night_start_hour).state + 0.5f);
+          int night_start_minute = static_cast<int>(id(backlight_night_start_minute).state + 0.5f);
+
+          day_start_hour = std::clamp(day_start_hour, 0, 23);
+          day_start_minute = std::clamp(day_start_minute, 0, 59);
+          night_start_hour = std::clamp(night_start_hour, 0, 23);
+          night_start_minute = std::clamp(night_start_minute, 0, 59);
+
+          const int day_start_total = day_start_hour * 60 + day_start_minute;
+          const int night_start_total = night_start_hour * 60 + night_start_minute;
+
+          bool is_daytime = true;
+          if (now.is_valid()) {
+            const int now_total = now.hour * 60 + now.minute;
+            if (day_start_total == night_start_total) {
+              is_daytime = true;
+            } else if (day_start_total < night_start_total) {
+              is_daytime = (now_total >= day_start_total && now_total < night_start_total);
+            } else {
+              // Supports schedules that cross midnight.
+              is_daytime = (now_total >= day_start_total || now_total < night_start_total);
+            }
+          }
+          auto call = id(display_backlight).turn_on();
+          call.set_brightness(is_daytime ? 1.0f : 0.5f);
+          call.perform();
+
+  - id: sync_lcd_power_gauge
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(power_arc) == nullptr || id(power_label) == nullptr) {
+            return;
+          }
+          // Outer ring: charger power 0..11 kW (same scale as the HA horseshoe card).
+          const float max_kw = 11.0f;
+          float kw = id(power).has_state() ? id(power).state : 0.0f;
+          if (!(kw == kw) || kw < 0.0f) {
+            kw = 0.0f;
+          }
+          const float arc_kw = std::min(kw, max_kw);
+          lv_arc_set_value(id(power_arc), static_cast<int32_t>(roundf(arc_kw * 100.0f)));
+
+          // HA "colorstop" style: use the colour of the highest stop at or below the value.
+          uint32_t ring_color = 0x2E7D32;  // 0 kW   green
+          if (kw >= 11.0f) {
+            ring_color = 0xC62828;         // 11 kW  red
+          } else if (kw >= 7.2f) {
+            ring_color = 0xEF6C00;         // 7.2 kW orange
+          } else if (kw >= 3.6f) {
+            ring_color = 0xF9A825;         // 3.6 kW amber
+          }
+          lv_obj_set_style_arc_color(id(power_arc), lv_color_hex(ring_color), LV_PART_INDICATOR);
+          lv_label_set_text(id(power_label), str_sprintf("%.2f", kw).c_str());
+
+  - id: sync_lcd_battery_gauge
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(battery_arc) == nullptr || id(net_power_label) == nullptr) {
+            return;
+          }
+          // Inner ring: house battery net power, -10..+10 kW drawn from the top
+          // (+ charging = green towards the right, - discharging = red towards the left).
+          const float min_kw = -10.0f;
+          const float max_kw = 10.0f;
+
+          bool valid = false;
+          float battery_kw = 0.0f;
+          if (id(ha_battery_power).has_state()) {
+            battery_kw = id(ha_battery_power).state / ${ha_battery_power_divisor};
+            valid = true;
+          } else if (id(ha_battery_power_filtered).has_state()) {
+            battery_kw = id(ha_battery_power_filtered).state;
+            valid = true;
+          }
+          if (!(battery_kw == battery_kw)) {
+            battery_kw = 0.0f;
+            valid = false;
+          }
+
+          const float arc_kw = std::clamp(battery_kw, min_kw, max_kw);
+          lv_arc_set_value(id(battery_arc), static_cast<int32_t>(roundf(arc_kw * 100.0f)));
+          const uint32_t ring_color = (battery_kw > 0.0f) ? 0x31FF00 : 0xFF1E1E;
+          lv_obj_set_style_arc_color(id(battery_arc), lv_color_hex(ring_color), LV_PART_INDICATOR);
+
+          if (valid) {
+            lv_label_set_text(id(net_power_label), str_sprintf("%.2f", battery_kw).c_str());
+          } else {
+            lv_label_set_text(id(net_power_label), "--");
+          }
+
+  - id: sync_lcd_mode_buttons
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(icon_mode_stop) == nullptr || id(icon_mode_normal) == nullptr || id(icon_mode_fast) == nullptr) {
+            return;
+          }
+          int mode = static_cast<int>(id(charger_mode).state + 0.5f);
+
+          // Same colours as the HA dashboard buttons; inactive icons are grey.
+          const lv_color_t inactive = lv_color_hex(0x8A8A8A);
+          lv_obj_set_style_text_color(id(icon_mode_stop), (mode == 0) ? lv_color_hex(0xFF5252) : inactive, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(icon_mode_normal), (mode == 2) ? lv_color_hex(0x42D66A) : inactive, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(icon_mode_fast), (mode == 3) ? lv_color_hex(0xFFB74D) : inactive, LV_PART_MAIN);
+
+number:
+  - platform: template
+    name: Backlight Day Start Hour
+    id: backlight_day_start_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 7
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+  - platform: template
+    name: Backlight Day Start Minute
+    id: backlight_day_start_minute
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+  - platform: template
+    name: Backlight Night Start Hour
+    id: backlight_night_start_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 19
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+  - platform: template
+    name: Backlight Night Start Minute
+    id: backlight_night_start_minute
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: True
+    mode: BOX
+    entity_category: config
+    on_value:
+      then:
+        - script.execute: apply_backlight_day_night
+
+output:
+  - platform: ledc 
+    pin: GPIO1
+    id: backlight
+    frequency: "1000Hz"
+
+font:
+  - file: "gfonts://Roboto"
+    id: roboto24
+    size: 24
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto18
+    size: 18
+    bpp: 8
+
+  # Gauge typography (mirrors the HA flex-horseshoe card)
+  - file: "gfonts://Roboto"
+    id: roboto14
+    size: 14
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto16
+    size: 16
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto22
+    size: 22
+    bpp: 8
+
+  - file: "gfonts://Roboto"
+    id: roboto64_num
+    size: 64
+    bpp: 8
+    glyphs: "0123456789.-"
+
+  - file: "gfonts://Roboto@bold"
+    id: roboto20_bold
+    size: 20
+    bpp: 8
+
+  # Material Design Icons used on the mode buttons (same icons as the HA dashboard)
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
+    id: mdi40
+    size: 40
+    bpp: 8
+    glyphs:
+      - "\U000F0425" # mdi:power
+      - "\U000F140B" # mdi:lightning-bolt
+      - "\U000F0241" # mdi:flash
+    
+light:
+  - platform: monochromatic
+    output: backlight
+    name: Display Backlight
+    id: display_backlight
+    restore_mode: ALWAYS_ON
+
+#-------------------------------------------
+# Touchscreen
+#-------------------------------------------
+
+i2c:
+  sda: 4
+  scl: 8
+  id: touchscreen_bus
+
+touchscreen:
+  - platform: axs15231
+    id: my_touchscreen
+    display: my_display
+    i2c_id: touchscreen_bus
+    # Native panel coords (320x480). LVGL rotation 270 remaps these to landscape.
+    # Do not swap/mirror here — that was only needed when rotation lived on the display.
+    calibration:
+      x_min: 0
+      x_max: 320
+      y_min: 0
+      y_max: 480
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: false
+    on_touch:
+      - lambda: |-
+          ESP_LOGI("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
+            touch.x,
+            touch.y,
+            touch.x_raw,
+            touch.y_raw
+          );
+          id(sync_lcd_mode_buttons).execute();
+
+#-------------------------------------------
+# Display axs15231 QSPI
+#-------------------------------------------
+
+spi:
+  id: display_qspi
+  type: quad
+  clk_pin: 47
+  data_pins: [21, 48, 40, 39]
+  
+display:
+  - platform: qspi_dbi
+    model: JC4832W535
+    data_rate: 40MHz
+    id: my_display
+    spi_id: display_qspi
+    dimensions:
+      height: 480
+      width: 320
+    cs_pin:
+      number: 45
+      ignore_strapping_warning: true
+    # Landscape is applied via lvgl.rotation (ESPHome 2026.x cannot rotate this display + LVGL together).
+    #draw_from_origin: true
+    #update_interval: never
+    auto_clear_enabled: false
+    #show_test_card: true # must enable update_interval, auto_clear_enable
+
+# Main LVGL section
+lvgl:
+  rotation: 270
+  displays:
+    - my_display
+  touchscreens:
+    - my_touchscreen
+  page_wrap: true
+  theme:
+    obj:
+      border_width: 0
+      pad_all: 0
+      bg_color: 0
+      text_color: white
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    label:
+      border_width: 0
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    image:
+      border_width: 0
+      scrollable: false
+#      outline_width: 1
+#      outline_color: red
+    button:
+      text_font: $text_font
+      scroll_on_focus: true
+      radius: 10px
+      shadow_width: 0 # This is required even though the default is supposed to be 0
+      checked:
+        bg_color: green
+        text_color: white
+
+# Main Page
+# Landscape 480x320 version of the HA horseshoe dashboard card:
+#   left  - flex-horseshoe style gauge (outer ring = charger power 0-11 kW,
+#           inner ring = house battery net power -10..+10 kW, bidirectional from the top)
+#           with NET / power / ADDED TODAY text inside and the charger state text
+#           centred underneath
+#   right - Stop / Normal / Fast mode buttons (mdi:power, mdi:lightning-bolt, mdi:flash)
+  pages:
+    - id: main_page
+      height: 320
+      width: 480
+      text_font: $text_font
+      scrollable: false
+      text_color: white
+      bg_color: 0
+      bg_opa: COVER
+      radius: 0
+      pad_all: 5
+      widgets:
+        # ---------------------------------------------------------------
+        # Gauge (left)
+        # ---------------------------------------------------------------
+        - obj:
+            id: gauge_box
+            align: TOP_LEFT
+            x: 8
+            y: 2
+            width: 300
+            height: 300
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            widgets:
+              # Outer ring: charger power (kW x 100), colour set by sync_lcd_power_gauge
+              - arc:
+                  id: power_arc
+                  align: CENTER
+                  width: 300
+                  height: 300
+                  pad_all: 0
+                  min_value: 0
+                  max_value: 1100
+                  value: 0
+                  start_angle: 135
+                  end_angle: 45
+                  mode: NORMAL
+                  adjustable: false
+                  arc_color: 0x303030
+                  arc_width: 18
+                  arc_rounded: false
+                  indicator:
+                    arc_color: 0x2E7D32
+                    arc_width: 18
+                    arc_rounded: false
+                  knob:
+                    bg_opa: 0%
+              # Inner ring: house battery net power (kW x 100), green = charging, red = discharging
+              - arc:
+                  id: battery_arc
+                  align: CENTER
+                  width: 252
+                  height: 252
+                  pad_all: 0
+                  min_value: -1000
+                  max_value: 1000
+                  value: 0
+                  start_angle: 135
+                  end_angle: 45
+                  mode: SYMMETRICAL
+                  adjustable: false
+                  arc_opa: TRANSP
+                  arc_width: 10
+                  arc_rounded: false
+                  indicator:
+                    arc_color: 0x31FF00
+                    arc_width: 10
+                    arc_rounded: false
+                  knob:
+                    bg_opa: 0%
+
+              # NET (house battery power)
+              - label:
+                  align: TOP_MID
+                  y: 42
+                  text: "NET"
+                  text_font: roboto16
+                  text_letter_space: 2
+                  text_color: 0xC8C8C8
+              - obj:
+                  align: TOP_MID
+                  y: 57
+                  width: 180
+                  height: 28
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollable: false
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: center
+                    flex_align_cross: start
+                    flex_align_track: start
+                    pad_column: 2
+                  widgets:
+                    - label:
+                        id: net_power_label
+                        text: "--"
+                        text_font: roboto22
+                        text_color: 0xD0D0D0
+                    - label:
+                        text: "kW"
+                        text_font: roboto14
+                        text_color: 0xC8C8C8
+
+              # Charger power (big number)
+              - obj:
+                  align: TOP_MID
+                  y: 76
+                  width: 290
+                  height: 78
+                  bg_opa: TRANSP
+                  border_width: 0
+                  pad_all: 0
+                  scrollable: false
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: center
+                    flex_align_cross: end
+                    flex_align_track: start
+                    pad_column: 6
+                  widgets:
+                    - label:
+                        id: power_label
+                        text: "0.00"
+                        text_font: roboto64_num
+                        text_color: 0xE6E6E6
+                    - label:
+                        text: "kW"
+                        text_font: roboto22
+                        text_color: 0xD0D0D0
+                        pad_bottom: 10 # sit the unit on the baseline of the big digits
+
+              # ADDED TODAY (values right-aligned to centre, units to the right)
+              - label:
+                  align: TOP_MID
+                  y: 150
+                  text: "ADDED TODAY"
+                  text_font: roboto16
+                  text_letter_space: 2
+                  text_color: 0xC8C8C8
+              - label:
+                  id: daily_energy_label
+                  align: TOP_MID
+                  x: -53
+                  y: 172
+                  width: 110
+                  text_align: RIGHT
+                  text: "0.00"
+                  text_font: roboto22
+                  text_color: 0xD0D0D0
+              - label:
+                  align: TOP_MID
+                  x: 44
+                  y: 172
+                  width: 60
+                  text_align: LEFT
+                  text: "kWh"
+                  text_font: roboto22
+                  text_color: 0xC8C8C8
+              - label:
+                  id: daily_cost_label
+                  align: TOP_MID
+                  x: -53
+                  y: 200
+                  width: 110
+                  text_align: RIGHT
+                  text: "0.00"
+                  text_font: roboto22
+                  text_color: 0xD0D0D0
+              - label:
+                  align: TOP_MID
+                  x: 44
+                  y: 200
+                  width: 60
+                  text_align: LEFT
+                  text: "$"
+                  text_font: roboto22
+                  text_color: 0xC8C8C8
+              - label:
+                  id: daily_percent_label
+                  align: TOP_MID
+                  x: -53
+                  y: 228
+                  width: 110
+                  text_align: RIGHT
+                  text: "0.0"
+                  text_font: roboto22
+                  text_color: 0xD0D0D0
+              - label:
+                  align: TOP_MID
+                  x: 44
+                  y: 228
+                  width: 60
+                  text_align: LEFT
+                  text: "%"
+                  text_font: roboto22
+                  text_color: 0xC8C8C8
+
+        # Charger mode / state text ("Normal Charging 32A"), centred under the gauge
+        - label:
+            id: label_machine_state
+            align: BOTTOM_LEFT
+            x: 0
+            y: -2
+            width: 316
+            long_mode: WRAP
+            text_align: CENTER
+            text: "--"
+            text_font: roboto20_bold
+            text_color: 0xE6E6E6
+
+        # ---------------------------------------------------------------
+        # Mode buttons (right) - icon colour is set by sync_lcd_mode_buttons
+        # ---------------------------------------------------------------
+        - button:
+            id: btn_mode_stop
+            align: TOP_RIGHT
+            x: 0
+            y: 5
+            width: 140
+            height: 92
+            radius: 12
+            bg_color: 0x2D2D2D
+            bg_opa: COVER
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            pressed:
+              bg_color: 0x4A4A4A
+            widgets:
+              - label:
+                  id: icon_mode_stop
+                  align: TOP_MID
+                  y: 12
+                  text: "\U000F0425" # mdi:power
+                  text_font: mdi40
+                  text_color: 0x8A8A8A
+              - label:
+                  align: BOTTOM_MID
+                  y: -10
+                  text: "Stop"
+                  text_font: roboto18
+                  text_color: white
+            on_short_click:
+              - number.set:
+                  id: charger_mode
+                  value: 0
+              - script.execute: sync_lcd_mode_buttons
+        - button:
+            id: btn_profile_normal
+            align: TOP_RIGHT
+            x: 0
+            y: 109
+            width: 140
+            height: 92
+            radius: 12
+            bg_color: 0x2D2D2D
+            bg_opa: COVER
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            pressed:
+              bg_color: 0x4A4A4A
+            widgets:
+              - label:
+                  id: icon_mode_normal
+                  align: TOP_MID
+                  y: 12
+                  text: "\U000F140B" # mdi:lightning-bolt
+                  text_font: mdi40
+                  text_color: 0x8A8A8A
+              - label:
+                  align: BOTTOM_MID
+                  y: -10
+                  text: "Normal"
+                  text_font: roboto18
+                  text_color: white
+            on_short_click:
+              - select.set:
+                  id: charge_profile
+                  option: "Normal"
+              - number.set:
+                  id: current_setpoint
+                  value: ${normal_setpoint_a}
+              - script.execute: sync_lcd_mode_buttons
+        - button:
+            id: btn_profile_force
+            align: TOP_RIGHT
+            x: 0
+            y: 213
+            width: 140
+            height: 92
+            radius: 12
+            bg_color: 0x2D2D2D
+            bg_opa: COVER
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            pressed:
+              bg_color: 0x4A4A4A
+            widgets:
+              - label:
+                  id: icon_mode_fast
+                  align: TOP_MID
+                  y: 12
+                  text: "\U000F0241" # mdi:flash
+                  text_font: mdi40
+                  text_color: 0x8A8A8A
+              - label:
+                  align: BOTTOM_MID
+                  y: -10
+                  text: "Fast"
+                  text_font: roboto18
+                  text_color: white
+            on_short_click:
+              - select.set:
+                  id: charge_profile
+                  option: "Fast"
+              - number.set:
+                  id: current_setpoint
+                  value: ${fast_setpoint_a}
+              - script.execute: sync_lcd_mode_buttons
