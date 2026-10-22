@@ -260,6 +260,8 @@ views:
                     width: 8
                     styles:
                       - stroke-linecap: butt
+                      # No animation: the negative bar animates its length and offset separately, so its end at zero flickers.
+                      - transition: none
                   color_stops:
                     "-4": "#ff1e1e"
                     "0": "#ff1e1e"
