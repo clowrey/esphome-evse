@@ -1,0 +1,6 @@
+data/*.txt
+*.exe
+*.o
+*.csv
+/replay
+/scenarios
