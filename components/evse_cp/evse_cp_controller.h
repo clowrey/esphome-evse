@@ -18,6 +18,9 @@ class EvseCpController : public PollingComponent {
  public:
   explicit EvseCpController(uint32_t update_interval_ms = 100) : PollingComponent(update_interval_ms) {}
 
+  // After the numbers and switches it drives.
+  float get_setup_priority() const override { return setup_priority::LATE; }
+
   void setup() override {
     // Default to State A at boot for a safe idle pilot.
     this->publish_state_(State::STATE_A_IDLE);
@@ -322,12 +325,6 @@ class EvseCpController : public PollingComponent {
   float last_published_pwm_{NAN};
   float last_published_cp_state_{NAN};
 };
-
-inline EvseCpController *cp_controller_singleton{nullptr};
-
-inline void set_cp_controller(EvseCpController *controller) { cp_controller_singleton = controller; }
-
-inline EvseCpController *get_cp_controller() { return cp_controller_singleton; }
 
 }  // namespace evse_cp
 }  // namespace esphome

@@ -63,6 +63,7 @@ sensor:
           - ${current_cal_4}
       - lambda: |-
           return x < 1.0f ? 0.0f : x;
+      - throttle_average: 6s
 
   - platform: template
     name: Current Raw
@@ -100,6 +101,7 @@ sensor:
           - 0.0035 -> 0.0
           - 0.246 -> 118.5
           - 0.49437 -> 239.1
+      - throttle_average: 10s
 
   - platform: template
     name: Voltage Raw
@@ -119,8 +121,9 @@ sensor:
     lambda: |-
         return id(voltage).state * id(current_measured).state;
     update_interval: 1s
-    filters: 
+    filters:
       - multiply: 0.001 # scale to kW
+      - delta: 0.02
     on_value:
       then:
         - script.execute: sync_lcd_power_gauge
@@ -130,6 +133,9 @@ sensor:
     id: daily_energy
     power_id: power
     accuracy_decimals: 2
+    filters:
+      - throttle: 30s
+      - delta: 0.01
     on_value:
       then:
         - lvgl.label.update:
@@ -157,6 +163,8 @@ sensor:
         return NAN;
       }
       return (id(daily_energy).state / battery_kwh) * 100.0f;
+    filters:
+      - delta: 0.1
     on_value:
       then:
         - lvgl.label.update:
@@ -184,6 +192,8 @@ sensor:
         return NAN;
       }
       return id(daily_energy).state * usd_per_kwh;
+    filters:
+      - delta: 0.01
     on_value:
       then:
         - lvgl.label.update:

@@ -1,21 +1,26 @@
 # J1772 control pilot: evse_cp component wiring, CP sensing, pilot PWM, relay and the offered current.
 # Included by packages/s3-evse.yaml.
 
+# The control-pilot state machine (components/evse_cp). It samples the CP line through the
+# two average sensors below, drives the pilot PWM and the relay, and publishes cp_state_machine.
 evse_cp:
-
-interval:
-  - interval: 100ms
-    then:
-      - lambda: |-
-          auto *cp_controller = esphome::evse_cp::get_cp_controller();
-          if (cp_controller != nullptr) {
-            cp_controller->update();
-          }
+  id: cp_controller
+  update_interval: 100ms
+  cp_pwm_output: cp_pwm_pin
+  cp_pwm_sensor: cp_pwm_template
+  cp_state_number: cp_state_machine
+  current_setpoint: current_setpoint
+  enable_switch: enable
+  debug_error_switch: debug_error
+  relay_switch: relay
 
 text_sensor:
   - platform: template
     name: CP State
     id: text_cp_state
+    on_value:
+      then:
+        - script.execute: sync_lcd_vehicle
 
 number:
   - platform: template
@@ -30,19 +35,7 @@ number:
     restore_value: true
     optimistic: True
     mode: BOX
-    on_value:
-      then:
-        - lambda: |-
-            float setpoint = id(current_setpoint).state;
-            if (!(setpoint == setpoint)) {
-              return;
-            }
-            if (setpoint > x) {
-              auto setpoint_call = id(current_setpoint).make_call();
-              setpoint_call.set_value(x);
-              id(internal_current_change_last_ms) = millis();
-              setpoint_call.perform();
-            }
+    # The charge controller pulls Current Setpoint down to this limit on its next tick.
 
   - platform: template
     unit_of_measurement: A
@@ -55,34 +48,8 @@ number:
     restore_value: true
     optimistic: True
     mode: BOX #display a box vs slider in the HA dashboard
-    on_value:
-      then:
-        - lambda: |-
-            uint32_t now = millis();
-            float max_limit = id(max_current_limit).state;
-            if (!(max_limit == max_limit)) {
-              max_limit = 40.0f;
-            }
-            if (max_limit < 6.0f) {
-              max_limit = 6.0f;
-            } else if (max_limit > 40.0f) {
-              max_limit = 40.0f;
-            }
-            if (x > max_limit) {
-              auto setpoint_call = id(current_setpoint).make_call();
-              setpoint_call.set_value(max_limit);
-              id(internal_current_change_last_ms) = now;
-              setpoint_call.perform();
-            }
-            if ((now - id(auto_current_change_last_ms)) < 1500 ||
-                (now - id(internal_current_change_last_ms)) < 1500) {
-              return;
-            }
-            int setpoint_a = static_cast<int>(x + 0.5f);
-            char event_msg[40];
-            snprintf(event_msg, sizeof(event_msg), "ha current set to %dA", setpoint_a);
-            id(event_flag).publish_state(event_msg);
-            id(event_ha_current_set).execute();
+    # A change made in Home Assistant or on the LCD is picked up by the charge controller
+    # as the new starting point ("user set NA" event); it also enforces Max Current Limit.
 
   - platform: template
     id: cp_state_machine
@@ -102,15 +69,6 @@ number:
         {
           case 0:
             id(text_cp_state).publish_state("Idle");
-            {
-              float setpoint = id(current_setpoint).state;
-              if (!(setpoint == setpoint) || setpoint > 6.5f) {
-                auto call = id(current_setpoint).make_call();
-                call.set_value(6.0f);
-                id(internal_current_change_last_ms) = millis();
-                call.perform();
-              }
-            }
             break;
           case 1:
             id(text_cp_state).publish_state("EV Connected");
@@ -183,10 +141,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            auto *cp_controller = esphome::evse_cp::get_cp_controller();
-            if (cp_controller != nullptr) {
-              cp_controller->set_cp_high_voltage(x);
-            }
+            id(cp_controller)->set_cp_high_voltage(x);
 
   - platform: template
     name: CP Low State Average Voltage
@@ -202,10 +157,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            auto *cp_controller = esphome::evse_cp::get_cp_controller();
-            if (cp_controller != nullptr) {
-              cp_controller->set_cp_low_voltage(x);
-            }
+            id(cp_controller)->set_cp_low_voltage(x);
 
 output:
   - platform: ledc # Duty cycle = amps / 0.6

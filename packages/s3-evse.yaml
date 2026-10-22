@@ -12,10 +12,18 @@ substitutions:
   # external_components source; a device file can point this at a local checkout (../esphome-evse/components).
   components_source: github://clowrey/esphome-evse@${firmware_ref}
 
-  # Signed power: positive is charging the house battery, negative is discharging.
-  # Divide by 1000 when the sensor is watts, or by 1 when it is already kilowatts.
+  # House-battery power, signed: positive is charging the house battery, negative is discharging.
+  # Up to two power entities are summed on the device (the second only when _2_enabled is 1), and an
+  # optional fallback entity takes over when one of them stops updating. All share the divisor:
+  # 1000 when the sensors are watts, 1 when they are already kilowatts.
   ha_battery_power_id: sensor.battery_power
+  ha_battery_power_2_enabled: "0"
+  ha_battery_power_2_id: sensor.battery_power
+  ha_battery_power_fallback_enabled: "0"
+  ha_battery_power_fallback_id: sensor.battery_power
   ha_battery_power_divisor: "1000.0"
+  # Line voltage used to size the control steps when the EVSE's own voltage reading is not available.
+  line_voltage_nominal: "230"
   ha_battery_voltage_id: sensor.battery_voltage
   ha_battery_soc_id: sensor.battery_state_of_charge
   # 0 ignores a second battery. Set to 1 and set ha_battery_2_soc_id to include it.

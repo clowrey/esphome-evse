@@ -76,10 +76,11 @@ script:
           const float min_kw = -10.0f;
           const float max_kw = 10.0f;
 
+          // Both are the controller's summed house-battery power in kW.
           bool valid = false;
           float battery_kw = 0.0f;
           if (id(ha_battery_power).has_state()) {
-            battery_kw = id(ha_battery_power).state / ${ha_battery_power_divisor};
+            battery_kw = id(ha_battery_power).state;
             valid = true;
           } else if (id(ha_battery_power_filtered).has_state()) {
             battery_kw = id(ha_battery_power_filtered).state;
@@ -115,6 +116,40 @@ script:
           lv_obj_set_style_text_color(id(icon_mode_stop), (mode == 0) ? lv_color_hex(0xFF5252) : inactive, LV_PART_MAIN);
           lv_obj_set_style_text_color(id(icon_mode_normal), (mode == 2) ? lv_color_hex(0x42D66A) : inactive, LV_PART_MAIN);
           lv_obj_set_style_text_color(id(icon_mode_fast), (mode == 3) ? lv_color_hex(0xFFB74D) : inactive, LV_PART_MAIN);
+
+  # Vehicle row under the mode buttons, from the CP State text (Idle / EV Connected / EV Charging / EV Vent / Error).
+  - id: sync_lcd_vehicle
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(icon_vehicle) == nullptr || id(label_vehicle) == nullptr) {
+            return;
+          }
+          const std::string &cp = id(text_cp_state).state;
+          const char *icon = "\U000F06A6";  // mdi:power-plug-off
+          const char *text = "No vehicle";
+          uint32_t color = 0x8A8A8A;
+          if (cp == "EV Connected") {
+            icon = "\U000F151D";  // mdi:ev-plug-type1
+            text = "Connected";
+            color = 0x42A5F5;
+          } else if (cp == "EV Charging") {
+            icon = "\U000F151D";
+            text = "Charging";
+            color = 0x42D66A;
+          } else if (cp == "EV Vent") {
+            icon = "\U000F05D6";  // mdi:alert-circle-outline
+            text = "Vent needed";
+            color = 0xFF5252;
+          } else if (cp == "Error") {
+            icon = "\U000F05D6";
+            text = "Pilot error";
+            color = 0xFF5252;
+          }
+          lv_label_set_text(id(icon_vehicle), icon);
+          lv_obj_set_style_text_color(id(icon_vehicle), lv_color_hex(color), LV_PART_MAIN);
+          lv_label_set_text(id(label_vehicle), text);
+          lv_obj_set_style_text_color(id(label_vehicle), lv_color_hex(color), LV_PART_MAIN);
 
 number:
   - platform: template
@@ -230,6 +265,16 @@ font:
       - "\U000F0425" # mdi:power
       - "\U000F140B" # mdi:lightning-bolt
       - "\U000F0241" # mdi:flash
+
+  # Vehicle connection row
+  - file: "https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf"
+    id: mdi24
+    size: 24
+    bpp: 8
+    glyphs:
+      - "\U000F151D" # mdi:ev-plug-type1
+      - "\U000F06A6" # mdi:power-plug-off
+      - "\U000F05D6" # mdi:alert-circle-outline
     
 light:
   - platform: monochromatic
@@ -570,7 +615,7 @@ lvgl:
             x: 0
             y: 5
             width: 140
-            height: 92
+            height: 84
             radius: 12
             bg_color: 0x2D2D2D
             bg_opa: COVER
@@ -602,9 +647,9 @@ lvgl:
             id: btn_profile_normal
             align: TOP_RIGHT
             x: 0
-            y: 109
+            y: 101
             width: 140
-            height: 92
+            height: 84
             radius: 12
             bg_color: 0x2D2D2D
             bg_opa: COVER
@@ -639,9 +684,9 @@ lvgl:
             id: btn_profile_force
             align: TOP_RIGHT
             x: 0
-            y: 213
+            y: 197
             width: 140
-            height: 92
+            height: 84
             radius: 12
             bg_color: 0x2D2D2D
             bg_opa: COVER
@@ -672,3 +717,34 @@ lvgl:
                   id: current_setpoint
                   value: ${fast_setpoint_a}
               - script.execute: sync_lcd_mode_buttons
+
+        # Vehicle connection (plug icon + text), colours set by sync_lcd_vehicle
+        - obj:
+            id: vehicle_row
+            align: TOP_RIGHT
+            x: 0
+            y: 287
+            width: 140
+            height: 28
+            bg_opa: TRANSP
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            layout:
+              type: flex
+              flex_flow: row
+              flex_align_main: center
+              flex_align_cross: center
+              flex_align_track: center
+              pad_column: 6
+            widgets:
+              - label:
+                  id: icon_vehicle
+                  text: "\U000F06A6" # mdi:power-plug-off
+                  text_font: mdi24
+                  text_color: 0x8A8A8A
+              - label:
+                  id: label_vehicle
+                  text: "No vehicle"
+                  text_font: roboto18
+                  text_color: 0x8A8A8A

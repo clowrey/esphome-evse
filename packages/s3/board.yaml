@@ -8,21 +8,9 @@ esphome:
   on_boot:
     priority: -100
     then:
-      - lambda: |-
-          auto *cp_controller = new esphome::evse_cp::EvseCpController(100);
-          cp_controller->set_cp_pwm_output(id(cp_pwm_pin));
-          cp_controller->set_cp_pwm_sensor(id(cp_pwm_template));
-          cp_controller->set_cp_state_number(id(cp_state_machine));
-          cp_controller->set_current_setpoint_number(id(current_setpoint));
-          cp_controller->set_enable_switch(id(enable));
-          cp_controller->set_debug_error_switch(id(debug_error));
-          cp_controller->set_relay_switch(id(relay));
-          esphome::evse_cp::set_cp_controller(cp_controller);
-          cp_controller->setup();
       - text_sensor.template.publish:
           id: event_flag
-          state: "idle"
-      - script.execute: apply_charger_mode
+          state: "boot"
       - script.execute: apply_backlight_day_night
 
 esp32:
@@ -45,7 +33,7 @@ preferences:
 external_components:
   # components_source is a substitution so a device file can build from a local checkout.
   - source: ${components_source}
-    components: [evse_cp]
+    components: [evse_cp, evse_charge_control]
     refresh: 0s
 
 # axs15231 is built into ESPHome 2026.7; the old PR overlay no longer compiles.

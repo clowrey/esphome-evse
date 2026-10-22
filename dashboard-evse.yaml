@@ -43,6 +43,27 @@ views:
               rows: auto
               columns: full
 
+          # Vehicle connection from the control pilot: No vehicle / connected / charging.
+          - type: custom:mushroom-template-card
+            entity: sensor.evse_0_cp_state
+            primary: >-
+              {% set names = {'Idle': 'No vehicle', 'EV Connected': 'Vehicle connected',
+                              'EV Charging': 'Vehicle charging', 'EV Vent': 'Vent required (not supported)',
+                              'Error': 'Pilot error'} %}
+              {{ names.get(states('sensor.evse_0_cp_state'), states('sensor.evse_0_cp_state')) }}
+            secondary: Charge cable
+            icon: >-
+              {% set s = states('sensor.evse_0_cp_state') %}
+              {% if s in ['EV Connected', 'EV Charging'] %}mdi:ev-plug-type1{% elif s in ['Error', 'EV Vent'] %}mdi:alert-circle-outline{% else %}mdi:power-plug-off-outline{% endif %}
+            icon_color: >-
+              {% set s = states('sensor.evse_0_cp_state') %}
+              {% if s == 'EV Charging' %}green{% elif s == 'EV Connected' %}blue{% elif s in ['Error', 'EV Vent'] %}red{% else %}grey{% endif %}
+            tap_action:
+              action: more-info
+            grid_options:
+              rows: auto
+              columns: full
+
           - type: conditional
             conditions:
               - condition: numeric_state
@@ -361,10 +382,10 @@ views:
 
           - type: custom:mushroom-template-card
             secondary: |-
-              Auto current starts at 6A and ramps based on battery power.
+              Normal and Fast hold the house battery at their target by stepping the car's current between 6 A and Max Current Limit.
 
-              Normal max battery discharge: 1 kW.
-              Fast target battery discharge: 3 kW.
+              Normal target: about 1 kW of battery discharge.
+              Fast target: about 3 kW; pauses at 6 A if the battery is still over target.
             multiline_secondary: true
             icon: mdi:information-outline
             icon_color: blue

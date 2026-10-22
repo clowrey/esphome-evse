@@ -10,11 +10,22 @@ substitutions:
   # ESPHome device comment.
   device_description: "EVSE based on Guition ESP32-S3-jc3248w535 320px X 480px Dev Board"
 
+  # Git ref (branch or tag) of esphome-evse to build from; used by packages: below.
+  firmware_ref: main
+
   # House battery power, signed: +charging, -discharging.
   # Normal and Fast modes step the charge current from this sensor.
   ha_battery_power_id: sensor.battery_power
-  # Divide the power sensor by this to get kW. 1000 for watts, 1 if the sensor is already kW.
+  # Optional second power entity, summed with the first (1 enables it), e.g. one sensor per battery.
+  ha_battery_power_2_enabled: "0"
+  ha_battery_power_2_id: sensor.battery_power
+  # Optional slower power entity used while one of the inputs above is stale (1 enables it).
+  ha_battery_power_fallback_enabled: "0"
+  ha_battery_power_fallback_id: sensor.battery_power
+  # Divide the power sensors by this to get kW. 1000 for watts, 1 if they are already kW.
   ha_battery_power_divisor: "1000.0"
+  # Supply voltage, used to size the control steps when the EVSE voltage reading is unavailable.
+  line_voltage_nominal: "230"
   # House battery voltage. Charging locks out after 30s at or below the cutoff (47 V unless changed on the device).
   ha_battery_voltage_id: sensor.battery_voltage
   # House battery state of charge, percent. Current is reduced in the 10% above the minimum SOC.
@@ -52,7 +63,7 @@ substitutions:
 packages:
   s3_evse:
     url: https://github.com/clowrey/esphome-evse.git
-    ref: main
+    ref: ${firmware_ref}
     files:
       - packages/s3-evse.yaml
     refresh: 0s

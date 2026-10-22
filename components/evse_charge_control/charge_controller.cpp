@@ -529,12 +529,13 @@ void ChargeController::debug_text(char *buf, size_t len) const {
       continue;
     }
     const uint32_t s = in.primary[i].age_ms == 0xFFFFFFFFu ? 999u : in.primary[i].age_ms / 1000u;
-    n += snprintf(ages + n, sizeof(ages) - n, "%s%lu", n ? "/" : "", static_cast<unsigned long>(std::min(s, 999u)));
+    n += snprintf(ages + n, sizeof(ages) - n, "%s%lu", n ? "/" : "",
+                  static_cast<unsigned long>(std::min<uint32_t>(s, 999u)));
   }
   if (n == 0) {
     snprintf(ages, sizeof(ages), "-");
   }
-  const uint32_t fb_age = in.fallback.enabled ? std::min(in.fallback.age_ms / 1000u, 999u) : 999u;
+  const uint32_t fb_age = in.fallback.enabled ? std::min<uint32_t>(in.fallback.age_ms / 1000u, 999u) : 999u;
 
   snprintf(buf, len,
            "mode:%d cp:%d en:%d lock:%d below:%ds cut:%.1fV V:%.1f P:%.2f(%s ages:%s fb:%lu int:%.1fs settle:%lus) F:%.2f "
