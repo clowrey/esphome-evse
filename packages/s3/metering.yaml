@@ -49,6 +49,9 @@ sensor:
     sensor: current_sensor_pin
     name: "Current Measured"
     id: current_measured
+    device_class: current
+    state_class: measurement
+    unit_of_measurement: A
     accuracy_decimals: 2
     sample_duration: 500ms
     update_interval: 2000ms
@@ -87,6 +90,7 @@ sensor:
     name: "Voltage"
     unit_of_measurement: V
     device_class: voltage
+    state_class: measurement
     id: voltage
     sample_duration: 500ms
     update_interval: 2000ms
@@ -117,6 +121,7 @@ sensor:
     id: power
     accuracy_decimals: 2
     device_class: power
+    state_class: measurement
     unit_of_measurement: kW
     lambda: |-
         return id(voltage).state * id(current_measured).state;

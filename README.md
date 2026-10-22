@@ -64,7 +64,9 @@ Host tests: `test/charge_control/build.sh` (Linux or WSL) or `build.ps1` (MinGW)
 
 Upgrading from the single-file package: the `PV Auto *` numbers, the `Auto Mode` switch and the `HA Battery * Read` sensors are gone (delete them in Home Assistant), the `Charge Control *` numbers and `Battery Power Source` are new, and `HA Battery Power` now reports the summed kilowatts.
 
-`dashboard-evse.yaml` is a Home Assistant dashboard for `name: evse-0`. It uses those entity ids (`sensor.evse_0_power`, `number.evse_0_charger_mode`, and the other `evse_0_` entities). It needs the flex-horseshoe-card and Mushroom cards from HACS. If you change `name`, change the `evse_0_` prefix to match.
+The [ESPHome EVSE Card](https://github.com/clowrey/esphome-evse-card) shows the whole charger in one Home Assistant card (power flow, controller band, controls, 24 h chart): `type: custom:esphome-evse-card`, `prefix: evse_0`.
+
+`dashboard-evse.yaml` is a Home Assistant dashboard for `name: evse-0` built from standard cards instead. It uses those entity ids (`sensor.evse_0_power`, `number.evse_0_charger_mode`, and the other `evse_0_` entities). It needs the flex-horseshoe-card and Mushroom cards from HACS. If you change `name`, change the `evse_0_` prefix to match.
 
 LCD
 
