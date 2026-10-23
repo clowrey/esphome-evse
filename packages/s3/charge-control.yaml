@@ -427,10 +427,13 @@ number:
 switch:
   # On = any mode other than Stop. Turning on picks Normal or Fast from Charge Profile
   # and asks the controller to clear a low-voltage lockout if the battery voltage allows.
+  # restore_mode DISABLED: the default ALWAYS_OFF ran turn_off_action at every boot, which put
+  # Charger Mode back to Stop after any reboot. The state comes from the lambda (Charger Mode).
   - platform: template
     name: Charger Enabled
     id: charger_enabled
     icon: mdi:power
+    restore_mode: DISABLED
     lambda: |-
       int mode = static_cast<int>(id(charger_mode).state + 0.5f);
       return mode > 0;
