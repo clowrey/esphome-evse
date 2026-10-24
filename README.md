@@ -1,80 +1,116 @@
 # esphome-evse
-EVSE running entirely on ESP32 MCU ESPHome YAML
 
-BETA firmware. Use at your own risk.
-- No RCD.
-- The S3 package includes PV auto charge (Normal / Fast), a low-voltage lockout, and the local LCD.
-- Home Assistant supplies the battery power, voltage, and state-of-charge sensors those modes use.
+EVSE running entirely on an ESP32-S3 in ESPHome YAML, with a charge controller that follows a
+house battery through Home Assistant.
 
-A device config sets the name, Wi-Fi, API and OTA credentials, and the substitutions below. Everything else is pulled from this repo:
+BETA firmware. Use at your own risk. No RCD.
 
-- `components/evse_cp` is the control-pilot state machine (external component).
-- `components/evse_charge_control` is the Normal/Fast charge-current controller. Its core (`charge_controller.h/.cpp`) has no ESPHome dependencies and is replayed against recorded data by the tests in `test/charge_control`.
-- `packages/s3-evse.yaml` is the entry point; it includes `packages/s3/board.yaml` (board, Wi-Fi, API, time), `cp-pilot.yaml` (pilot sensing, PWM, relay, offered current), `metering.yaml` (CT current, voltage, power, daily energy), `charge-control.yaml` (battery inputs, controller, modes, status) and `lcd.yaml` (display).
+![Home Assistant cards](images/ha-cards.png)
 
-## How charging is controlled
+## Charge modes
 
-Charger Mode is Stop, Manual, Normal or Fast. Manual charges at Current Setpoint. Normal and Fast hold the house-battery power at a target by stepping Current Setpoint between 6 A and Max Current Limit:
+| Mode | What it does |
+| --- | --- |
+| Stop | Pilot off. |
+| Manual | Offers Current Setpoint to the car. |
+| Normal | Holds the house battery at Normal Target (default −1 kW, about 1 kW of discharge). With PV surplus the car ramps up to Max Current Limit; at night it sits at 6 A. |
+| Fast | Holds Fast Target (default −3 kW). If the battery is still over target with the car at 6 A for a minute, it pauses, and restarts once there's room again. |
 
-- The battery power is the sum of the configured Home Assistant power entities (positive = charging the house battery). Steps are judged on readings taken after the previous step: the controller waits a settle time (8 s, or 2.5 update intervals of a slow sensor, or 40 s on the fallback input) and three ticks of agreement, then steps by about 0.8 A per amp of error (at most 4 A up, 8 A down). The hold band is 0.25 kW or 1.5 A worth of power, whichever is wider, so one step always lands inside it.
-- Normal Target (default −1 kW) holds about 1 kW of battery discharge: with PV surplus the car ramps all the way up to Max Current Limit; at night it sits at 6 A. Normal never pauses.
-- Fast Target (default −3 kW) holds about 3 kW of discharge. If the battery is still over target with the car at 6 A for a minute, Fast pauses (pilot off) and resumes once the house alone leaves room to restart at 6 A.
-- A current set from Home Assistant or the LCD is taken as the new starting point ("user set 40A" event) and the controller continues from there.
-- Battery Target Min SOC stops charging (resume 1 % higher) and reduces the current limit in the 10 % above it. Battery Low Voltage Cutoff (0 = off) latches a lockout after 30 s below it; Charger Enabled clears it once the voltage is back above the cutoff.
-- If a power input stops updating (30 s) the fallback input takes over; with no usable input the current is held, never raised, and drops to 6 A after 10 minutes. `Battery Power Source` shows which input is in use.
+The controller steps the offered current every few seconds, sized to the error, and leaves it alone
+while the battery is within ±1.5 A worth of power of the target, so it doesn't hunt. Setting a
+current by hand (HA or LCD) just gives it a new starting point.
 
-The tuning lives in the `Charge Control *` numbers (deadband, gain, max step up/down, settle times, evidence samples, filter alpha, pause/resume, stale time, blind timeout). `Event Flag` records one line per controller action; `HA Inputs Debug` is a one-line dump of everything the controller sees.
+Protection:
 
-`esphome-evse.yaml` is a starting device config. Point `packages:` at this repo:
+- **House SOC:** charging stops at Battery Target Min SOC (default 20 %) and starts again at 21 %.
+  From 30 % down to 20 % the current limit tapers to 6 A. With two batteries the lower SOC counts.
+- **Low voltage:** below Battery Low Voltage Cutoff for 30 s latches a lockout (0 V turns it off).
+  Turning Charger Enabled back on clears it once the voltage has recovered.
+- **Lost battery data:** if an input stops updating for 30 s the fallback input takes over. With no
+  input at all the current is held, never raised, and drops to 6 A after 10 minutes.
+
+## Home Assistant cards
+
+[esphome-evse-card](https://github.com/clowrey/esphome-evse-card) (HACS) has two cards:
+
+| Advanced | Simple |
+| --- | --- |
+| <img src="images/ha-card-advanced.png" alt="Advanced card" width="100%"> | <img src="images/ha-card-simple.png" alt="Simple card" width="100%"> |
+| Battery → EVSE → car flow, where the battery sits against the controller's target band, controls, last event, 24 h chart. | Status, Stop / Normal / Fast, and a gauge with charger power, battery power and today's energy. |
 
 ```yaml
+type: custom:esphome-evse-card        # or custom:esphome-evse-simple-card
+prefix: evse_0
+```
+
+`dashboard-evse.yaml` is an older dashboard built from flex-horseshoe and Mushroom cards instead.
+
+## Setup
+
+A device file sets the name, Wi-Fi, API, OTA and the substitutions below, and pulls the rest from
+this repo. Start from `esphome-evse.yaml`:
+
+```yaml
+substitutions:
+  name: evse-0
+  firmware_ref: main
+  ha_battery_power_id: sensor.battery_power
+  ha_battery_power_divisor: "1000.0"   # W -> kW; use "1" if the sensor is already kW
+
 packages:
   s3_evse:
     url: https://github.com/clowrey/esphome-evse.git
-    ref: main
+    ref: ${firmware_ref}
     files:
       - packages/s3-evse.yaml
     refresh: 0s
 ```
 
-`secrets.yaml` needs `wifi_ssid`, `wifi_password`, `ota_password`, and `api_encryption_key`. Set `wifi.use_address` when OTA should target an IP the device already has.
+`secrets.yaml` needs `wifi_ssid`, `wifi_password`, `ota_password` and `api_encryption_key`.
 
-The package uses these defaults when a device file leaves a substitution out. Values marked first-boot are used once; later changes are saved on the device.
+Substitutions (anything left out uses the package default; "first boot" values are saved on the
+device after that and changed there):
 
-- `name` — hostname, for example `evse-0`. Entity ids use it with the hyphen turned into an underscore (`sensor.evse_0_power`). Leave this as `evse-0`, `evse-1`, and so on if you will have more than one EVSE. You can rename the device in Home Assistant afterward; that does not change the entity ids. Changing `name` in the YAML makes Home Assistant see a new device.
-- `device_description` — ESPHome device comment.
-- `firmware_ref` — git ref (branch or tag) of this repo that the device builds from. Use it in the device file's `packages: ref: ${firmware_ref}`. `components_source` is the matching external-components source (default `github://clowrey/esphome-evse@${firmware_ref}`); point it at `../esphome-evse/components` to build from a local checkout.
-- `ha_battery_power_id` — house battery power entity, signed: positive is charging the house battery, negative is discharging. Normal and Fast modes step the charge current from this sensor.
-- `ha_battery_power_2_enabled` / `ha_battery_power_2_id` — `1` adds a second power entity that is summed with the first (for example one sensor per battery).
-- `ha_battery_power_fallback_enabled` / `ha_battery_power_fallback_id` — `1` names a slower power entity to use while one of the inputs above is unavailable or stale.
-- `ha_battery_power_divisor` — divide those sensors by this to get kilowatts. Use `1000` when they are watts, and `1` when they are already kilowatts.
-- `line_voltage_nominal` — supply voltage used to size the control steps when the EVSE's own voltage reading is unavailable (default 230).
-- `ha_battery_voltage_id` — house battery voltage entity. Charging locks out after 30 seconds at or below the cutoff (47 V unless changed on the device).
-- `ha_battery_soc_id` — house battery state of charge, percent. Current is reduced in the 10% above the minimum SOC. At or below that minimum, Normal and Fast stop charging until SOC is 1% above it. With two batteries, the lower SOC is used.
-- `ha_battery_2_enabled` — `0` ignores a second battery. `1` includes `ha_battery_2_soc_id`.
-- `ha_battery_2_soc_id` — second house battery state of charge. Used only when `ha_battery_2_enabled` is `1`.
-- `current_cal_0` .. `current_cal_4` — CT clamp calibration, `raw reading -> amps`.
-- `max_current_initial` — first-boot Max Current Limit, amps. This is the ceiling. Current Setpoint is what the car is offered, and Normal and Fast step that setpoint between 6 A and this limit. 6 A is the floor because 5 A showed up as 0 A on a Leaf. After first boot, change Max Current Limit on the device.
-- `normal_setpoint_a` — LCD Normal button only. It selects Normal and sets Current Setpoint to this many amps, which is the floor the ramp starts from. Auto then raises it when the house battery is charging and lowers it when discharge passes the Normal target. The Home Assistant Normal button changes mode only.
-- `fast_setpoint_a` — LCD Fast button only. It selects Fast and jumps Current Setpoint to this many amps. Auto then moves it to hold house-battery discharge near the Fast target, still between 6 A and Max Current Limit. If it is already at 6 A and the battery keeps discharging, Fast pauses. The Home Assistant Fast button changes mode only.
-- `electricity_cost_initial` — first-boot electricity price, USD per kWh, for the daily cost on the LCD.
-- `car_battery_kwh_initial` — first-boot car battery size, kWh. Daily energy is also shown as a percent of this.
+| Substitution | |
+| --- | --- |
+| `name` | Hostname, e.g. `evse-0`. Entity ids use it with `_` for `-` (`sensor.evse_0_power`). |
+| `firmware_ref` | Branch or tag of this repo to build from. `components_source` follows it; set that to `../esphome-evse/components` to build from a local checkout. |
+| `ha_battery_power_id` | House battery power, signed: + charging, − discharging. |
+| `ha_battery_power_2_enabled`, `_2_id` | `1` adds a second power sensor, summed with the first (one per battery). |
+| `ha_battery_power_fallback_enabled`, `_fallback_id` | `1` adds a slower sensor used while one of the above is stale. |
+| `ha_battery_power_divisor` | `1000` for W, `1` for kW. Applies to all power sensors. |
+| `ha_battery_voltage_id` | House battery voltage, for the low-voltage lockout. |
+| `ha_battery_soc_id` | House battery SOC. |
+| `ha_battery_2_enabled`, `ha_battery_2_soc_id` | `1` adds a second battery's SOC. |
+| `battery_low_voltage_cutoff_initial` | First boot: lockout voltage (default 47, 0 = off). |
+| `line_voltage_nominal` | Supply voltage used if the EVSE's own reading is missing (default 230). |
+| `current_cal_0` … `current_cal_4` | CT clamp calibration, `raw -> amps`. |
+| `max_current_initial` | First boot: Max Current Limit, the ceiling the controller works under. 6 A is the floor (5 A read as 0 A on a Leaf). |
+| `normal_setpoint_a`, `fast_setpoint_a` | Current the LCD's Normal / Fast buttons start from. The HA buttons only change mode. |
+| `electricity_cost_initial` | First boot: price per kWh for the daily cost. |
+| `car_battery_kwh_initial` | First boot: car battery size, for "% added today". |
 
-Host tests: `test/charge_control/build.sh` (Linux or WSL) or `build.ps1` (MinGW) builds `scenarios` (synthetic checks) and `replay` (recorded-data replay, see `test/charge_control/data/README.md`).
+The controller's tuning is in the `Charge Control …` numbers on the device. `Event Flag` logs each
+thing it does, `Battery Power Source` shows which input it's using, and `HA Inputs Debug` dumps
+everything it sees on one line.
 
-Upgrading from the single-file package: the `PV Auto *` numbers, the `Auto Mode` switch and the `HA Battery * Read` sensors are gone (delete them in Home Assistant), the `Charge Control *` numbers and `Battery Power Source` are new, and `HA Battery Power` now reports the summed kilowatts.
+## Code
 
-The [ESPHome EVSE Card](https://github.com/clowrey/esphome-evse-card) shows the whole charger in one Home Assistant card (power flow, controller band, controls, 24 h chart): `type: custom:esphome-evse-card`, `prefix: evse_0`.
+- `packages/s3-evse.yaml` – entry point. Includes `packages/s3/` board, cp-pilot, metering,
+  charge-control and lcd.
+- `components/evse_cp` – control pilot state machine.
+- `components/evse_charge_control` – the charge controller. `charge_controller.cpp` has no ESPHome
+  dependencies; `test/charge_control` runs it against recorded HA data (`build.sh` in Linux/WSL).
 
-`dashboard-evse.yaml` is a Home Assistant dashboard for `name: evse-0` built from standard cards instead. It uses those entity ids (`sensor.evse_0_power`, `number.evse_0_charger_mode`, and the other `evse_0_` entities). It needs the flex-horseshoe-card and Mushroom cards from HACS. If you change `name`, change the `evse_0_` prefix to match.
+Upgrading from the old single-file package: the `PV Auto …` numbers, `Auto Mode` switch and
+`HA Battery … Read` sensors are gone (delete them in HA), and `HA Battery Power` now reports kW.
+The tag `legacy-pv-auto` is the last build before the change.
+
+## Hardware
 
 LCD
 
 <img src="images/lcd.jpg" alt="EVSE LCD" style="width:45%; height:auto;">
-
-Home Assistant dashboard
-
-<img src="images/ha-dashboard.png" alt="Home Assistant EVSE dashboard" style="width:30%; height:auto;">
 
 [Post in the ESPHome Discord "Show Off" Channel](https://discord.com/channels/429907082951524364/1308643575449518160) 
 
@@ -102,4 +138,3 @@ PCB Designed by me - produced by JLCPCB
 
 <img src="https://github.com/user-attachments/assets/aeedd815-5398-4cb1-81bf-dedf85389a31" alt="Alt Text" style="width:40%; height:auto;">
 <img src="https://github.com/user-attachments/assets/885721e3-cc22-4db5-8445-3736fb2d41a7" alt="Alt Text" style="width:40%; height:auto;">
-
